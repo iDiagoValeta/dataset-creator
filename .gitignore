@@ -12,8 +12,9 @@ venv/
 .env
 
 # Runtime artifacts
-rag/debug_dataset/*.json
-rag/datasets/*.json
-rag/datasets/*.jsonl
-!rag/datasets/.gitkeep
-
+pipeline/input/*.pdf
+!pipeline/input/.gitkeep
+pipeline/run_logs/*.json
+pipeline/output/*.json
+pipeline/output/*.jsonl
+!pipeline/output/.gitkeep

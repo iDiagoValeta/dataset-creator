@@ -1,13 +1,10 @@
 # dataset-creator
 
-Repositorio para generar datasets de entrenamiento/evaluacion a partir de documentos PDF usando un agente local en Ollama.
+Repositorio para generar datasets de preguntas/respuestas a partir de PDFs usando Ollama en local.
 
-Inspirado en la estructura de `localOllamaRAG`, pero enfocado en un flujo concreto:
+## Objetivo
 
-1. Extraer texto de PDFs.
-2. Construir mapa global de topicos por documento (con contexto amplio).
-3. Generar preguntas por topico sin repeticion semantica.
-4. Exportar dataset en JSONL y splits train/val/test.
+Dado un PDF en `pipeline/input/`, el pipeline genera un JSONL estructurado con preguntas deducibles del texto, respuestas argumentables y trazabilidad de contexto.
 
 ## Estructura
 
@@ -15,32 +12,30 @@ Inspirado en la estructura de `localOllamaRAG`, pero enfocado en un flujo concre
 dataset-creator/
 ├── CLAUDE.md
 ├── README.md
-└── rag/
+└── pipeline/
     ├── generate_dataset.py
     ├── requirements.txt
-    ├── pdfs/
+    ├── input/
     │   └── .gitkeep
-    ├── datasets/
+    ├── output/
     │   └── .gitkeep
-    └── debug_dataset/
+    └── run_logs/
         └── .gitkeep
 ```
 
 ## Requisitos
 
 - Python 3.10+
-- Ollama ejecutandose localmente
-- Un modelo de generacion descargado en Ollama
+- Ollama levantado localmente
+- Modelo descargado en Ollama (default recomendado: `gemma4:e2b`)
 
 ## Instalacion
 
 ```bash
-pip install -r rag/requirements.txt
+pip install -r pipeline/requirements.txt
 ```
 
-## Configuracion por entorno
-
-Variables opcionales:
+## Variables de entorno
 
 - `OLLAMA_DATASET_MODEL` (fallback: `OLLAMA_RAG_MODEL`, default `gemma4:e2b`)
 - `DATASET_LANGUAGE` (default `es`)
@@ -53,31 +48,33 @@ Variables opcionales:
 - `DATASET_SEED` (default `42`)
 - `DATASET_MAX_DOC_CONTEXT_CHARS` (default `110000`)
 - `DATASET_MAX_TOPIC_CONTEXT_CHARS` (default `24000`)
+- `OLLAMA_TIMEOUT_SECS` (default `300`)
+- `DATASET_LOG_LEVEL` (default `INFO`)
 
 ## Uso rapido
 
-1. Coloca tus PDFs en `rag/pdfs/`.
+1. Coloca PDFs en `pipeline/input/`.
 2. Ejecuta:
 
 ```bash
-python rag/generate_dataset.py
+python pipeline/generate_dataset.py
 ```
 
 Salida:
 
-- `rag/datasets/dataset.jsonl`
-- `rag/datasets/dataset_train.jsonl`
-- `rag/datasets/dataset_val.jsonl`
-- `rag/datasets/dataset_test.jsonl`
-- `rag/datasets/dataset.meta.json`
-- `rag/debug_dataset/*.json` (salida cruda por chunk para debug)
+- `pipeline/output/dataset.jsonl`
+- `pipeline/output/dataset_train.jsonl`
+- `pipeline/output/dataset_val.jsonl`
+- `pipeline/output/dataset_test.jsonl`
+- `pipeline/output/dataset.meta.json`
+- `pipeline/run_logs/<pdf>.json`
 
 ## Ejemplos CLI
 
 ```bash
-python rag/generate_dataset.py --model gemma4:e2b --num-topics 10 --questions-per-topic 8
-python rag/generate_dataset.py --language en --split 0.7,0.15,0.15
-python rag/generate_dataset.py --source-dir rag/pdfs --output rag/datasets/tesis_es.jsonl
+python pipeline/generate_dataset.py --model gemma4:e2b --num-topics 10 --questions-per-topic 8
+python pipeline/generate_dataset.py --language en --split 0.7,0.15,0.15
+python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/tesis_es.jsonl
 ```
 
 ## Formato de cada item
@@ -87,19 +84,21 @@ Cada linea JSONL incluye:
 - `id`
 - `question`
 - `answer`
-- `type` (`factual|conceptual|reasoning`)
+- `type` (`factual|conceptual|inference|compare|definition`)
+- `difficulty` (`easy|medium|hard`)
+- `context_source`
 - `topic`
 - `topic_id`
 - `topic_keywords`
-- `difficulty` (`easy|medium|hard`)
 - `document`
 - `created_at`
 - `context_excerpt`
 
-## Notas
+## Robustez y validaciones
 
-- Si `pymupdf4llm` falla o no esta instalado, se usa fallback a `pypdf`.
-- El script usa `think=False` en Ollama para priorizar salida util y estable.
-- El flujo actual es solo texto: no usa imagenes ni tablas para generar preguntas.
-- Primero se crea un mapa de topicos global por PDF y luego se generan preguntas separadas por topico.
-- Si cambias de modelo o prompt, regenera el dataset completo para mantener consistencia.
+- Manejo defensivo de errores de lectura PDF (incluyendo PDF corrupto o pagina fallida).
+- Timeout configurable para llamadas a Ollama.
+- Validacion de argumentos al inicio (`chunk_overlap < chunk_size`, rangos de parametros).
+- Fallback de topicos por chunks si el modelo no devuelve topicos parseables.
+- Deduplicacion exacta y semantica (bigrams) para reducir repeticiones.
+
