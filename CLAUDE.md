@@ -11,7 +11,7 @@ Working guide for this repository.
 
 This repo generates synthetic supervised datasets from PDFs using local models served by Ollama.
 The architectural reference is `localOllamaRAG`, but the goal here is dataset creation, not an end-user RAG interface.
-The primary use case is producing QA corpora in Spanish (Castilian) and Valencian; English is supported for completeness.
+The primary use case is producing QA corpora in the same language as each source PDF. Spanish (Castilian) and Valencian are important use cases, but default generation should follow per-document language detection unless the user explicitly forces `--language`.
 
 ## 2. Operating rules
 
@@ -60,11 +60,12 @@ pyproject.toml
 1. Load PDFs from `pipeline/input/`.
 2. Extract text (`pymupdf4llm` preferred, `pypdf` defensive fallback).
 3. Split text into overlapping chunks.
-4. Generate a topic map per document using wide context.
-5. Generate questions per topic without semantic repetition (`think=False`).
-6. Deduplicate (exact + semantic via bigrams).
-7. Export the main JSONL and train/val/test splits.
-8. Persist metadata and per-document/topic run logs, plus per-document checkpoints for `--resume`.
+4. Detect the document language unless `--language` forces a specific output language.
+5. Generate a topic map per document using wide context, with compact retry and chunk fallback.
+6. Generate questions per topic without semantic repetition (`think=False`) in the document language.
+7. Deduplicate (exact + semantic via bigrams).
+8. Export the main JSONL and train/val/test splits.
+9. Persist metadata and per-document/topic run logs, plus per-document checkpoints for `--resume`.
 
 ## 6. Critical variables
 
@@ -75,10 +76,24 @@ pyproject.toml
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
 | `DATASET_LOG_LEVEL` | `INFO` | Logging level (`DEBUG/INFO/WARNING/ERROR`) |
-| `DATASET_LANGUAGE` | `es` | Output language |
+| `DATASET_LANGUAGE` | `auto` | Detect language per PDF; use `es`, `en`, `ca`, etc. to force output |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size |
 | `DATASET_CHUNK_OVERLAP` | `350` | Chunk overlap |
 | `DATASET_NUM_TOPICS` | `8` | Max topics per document |
 | `DATASET_QUESTIONS_PER_TOPIC` | `6` | QA items per topic |
 | `DATASET_MAX_DOC_CONTEXT_CHARS` | `110000` | Max context for topic mapping |
 | `DATASET_MAX_TOPIC_CONTEXT_CHARS` | `24000` | Max context for QA generation |
+
+## 7. Current CLI notes
+
+- `--language auto` is the default and should generate topics, questions, and answers in the detected source-document language.
+- `--language <code>` forces one language for all PDFs.
+- `--dry-run` extracts/chunks PDFs and reports detected language, estimated topics/items, and estimated Ollama calls without model generation.
+- `--clean-dry-run` lists generated JSON/JSONL artifacts that would be removed.
+- `--clean` removes generated `.json` and `.jsonl` files from `pipeline/output` and `pipeline/run_logs`, preserving `.gitkeep` and input PDFs.
+
+## 8. Output schema and metadata notes
+
+Each item includes `document_language` in addition to the QA fields, topic fields, source document, timestamps, and context traceability.
+
+`dataset.meta.json` includes `document_languages`, a mapping from PDF filename to the detected or forced language, plus counts, params, split sizes, runtime info, and reproducibility metadata.

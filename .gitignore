@@ -17,7 +17,9 @@ venv/
 # Runtime artifacts
 pipeline/input/*.pdf
 !pipeline/input/.gitkeep
-pipeline/run_logs/*.json
+pipeline/run_logs/**/*.json
+pipeline/run_logs/**/*.jsonl
+!pipeline/run_logs/.gitkeep
 pipeline/output/*.json
 pipeline/output/*.jsonl
 !pipeline/output/.gitkeep

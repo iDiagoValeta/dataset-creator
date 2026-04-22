@@ -53,6 +53,7 @@ import random
 import re
 import subprocess
 import time
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -85,7 +86,7 @@ DEFAULT_OUTPUT_PATH = BASE_DIR / "output" / "dataset.jsonl"
 DEFAULT_DEBUG_DIR = BASE_DIR / "run_logs"
 
 DEFAULT_MODEL = os.getenv("OLLAMA_DATASET_MODEL", os.getenv("OLLAMA_RAG_MODEL", "gemma4:e2b"))
-DEFAULT_LANGUAGE = os.getenv("DATASET_LANGUAGE", "es")
+DEFAULT_LANGUAGE = os.getenv("DATASET_LANGUAGE", "auto")
 DEFAULT_CHUNK_SIZE = int(os.getenv("DATASET_CHUNK_SIZE", "3500"))
 DEFAULT_CHUNK_OVERLAP = int(os.getenv("DATASET_CHUNK_OVERLAP", "350"))
 DEFAULT_NUM_TOPICS = int(os.getenv("DATASET_NUM_TOPICS", "8"))
@@ -110,6 +111,35 @@ STOPWORDS: frozenset = frozenset({
     "what", "which", "how", "does", "that", "with", "from", "have", "has",
     "this", "these", "those", "the", "and", "for",
 })
+LANGUAGE_MARKERS: dict[str, set[str]] = {
+    "en": {
+        "the", "and", "of", "to", "in", "is", "are", "that", "with", "for",
+        "from", "this", "these", "which", "system", "software", "computer",
+    },
+    "es": {
+        "el", "la", "los", "las", "de", "del", "que", "en", "es", "son",
+        "para", "con", "por", "como", "sistema", "software", "computadora",
+    },
+    "ca": {
+        "el", "la", "els", "les", "de", "del", "que", "en", "es", "son",
+        "per", "amb", "com", "sistema", "programari", "ordinador",
+    },
+    "fr": {
+        "le", "la", "les", "des", "de", "du", "que", "dans", "est", "sont",
+        "pour", "avec", "par", "comme", "systeme", "logiciel", "ordinateur",
+    },
+    "pt": {
+        "o", "a", "os", "as", "de", "do", "da", "que", "em", "e", "sao",
+        "para", "com", "por", "como", "sistema", "software", "computador",
+    },
+}
+LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "es": "Spanish",
+    "ca": "Catalan",
+    "fr": "French",
+    "pt": "Portuguese",
+}
 # Back-compat alias (kept for any external importers).
 _STOPWORDS_SET = STOPWORDS
 
@@ -183,6 +213,12 @@ def normalize_whitespace(text: str) -> str:
     return text.strip()
 
 
+def strip_accents_ascii(text: str) -> str:
+    """Lowercase and remove accents for simple language heuristics."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
 def clean_markdown_artifacts(text: str) -> str:
     """Remove markdown/wiki artifacts that hurt topic and QA generation quality."""
     cleaned = text
@@ -228,6 +264,40 @@ def deduplicate_preserve_order(values: Sequence[str]) -> list[str]:
         seen.add(low)
         out.append(clean)
     return out
+
+
+def detect_document_language(text: str) -> tuple[str, str, dict[str, int]]:
+    """Infer the dominant document language from extracted text."""
+    sample = normalize_whitespace(text[:60000]).lower()
+    raw_words = re.findall(r"[a-zÀ-ÿ]{2,}", sample, flags=re.IGNORECASE)
+    normalized_words = [strip_accents_ascii(word) for word in raw_words]
+    scores = {
+        code: sum(1 for word in normalized_words if word in markers)
+        for code, markers in LANGUAGE_MARKERS.items()
+    }
+
+    if "ñ" in sample or "¿" in sample or "¡" in sample:
+        scores["es"] += 8
+    if any(token in sample for token in (" l'", " d'", " qu'", "à", "è", "ç")):
+        scores["fr"] += 4
+        scores["ca"] += 2
+    if any(token in sample for token in ("ção", "ões", "ã", "õ")):
+        scores["pt"] += 6
+
+    best_code = max(scores, key=scores.get) if scores else "en"
+    if scores.get(best_code, 0) <= 0:
+        best_code = "en"
+    return best_code, LANGUAGE_NAMES.get(best_code, best_code), scores
+
+
+def resolve_generation_language(language_arg: str, document_text: str) -> tuple[str, str, dict[str, int]]:
+    """Use explicit --language unless it is auto, otherwise detect from document text."""
+    requested = (language_arg or "auto").strip()
+    if requested.lower() != "auto":
+        return requested, requested, {}
+    code, name, scores = detect_document_language(document_text)
+    prompt_language = f"{name} ({code}), the same language as the source document"
+    return prompt_language, code, scores
 
 
 # ----------------------------------------------------------------------
@@ -325,6 +395,7 @@ def build_topic_map_messages(document: str, full_text: str, language: str, num_t
     user_prompt = f"""
 Analyze this full document and extract a topic map.
 Language for topic names and summaries: {language}.
+Use that language for every generated field, even if the prompt instructions are in English.
 Generate up to {num_topics} high-level topics with minimal overlap.
 
 Output format (strict JSON object):
@@ -353,6 +424,71 @@ Text:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
+def build_representative_document_context(chunks: Sequence[Chunk], max_chars: int) -> str:
+    """Build a compact document sample spread across the whole source."""
+    if not chunks or max_chars <= 0:
+        return ""
+
+    if len(chunks) <= 3:
+        selected_indices = list(range(len(chunks)))
+    else:
+        mid = len(chunks) // 2
+        selected_indices = deduplicate_preserve_order(
+            [str(i) for i in [0, 1, mid, max(0, len(chunks) - 2), len(chunks) - 1]]
+        )
+        selected_indices = [int(i) for i in selected_indices]
+
+    blocks: list[str] = []
+    total = 0
+    per_chunk_budget = max(1200, max_chars // max(1, len(selected_indices)))
+    for chunk_idx in selected_indices:
+        chunk = chunks[chunk_idx]
+        excerpt = truncate_text(chunk.text, per_chunk_budget)
+        block = f"[{chunk.chunk_id}]\n{excerpt}"
+        if total + len(block) > max_chars:
+            remaining = max_chars - total
+            if remaining < 500:
+                break
+            block = truncate_text(block, remaining)
+        blocks.append(block)
+        total += len(block)
+        if total >= max_chars:
+            break
+    return "\n\n".join(blocks)
+
+
+def build_topic_map_messages_compact(
+    document: str,
+    sampled_text: str,
+    language: str,
+    num_topics: int,
+) -> list[dict[str, str]]:
+    """Create a shorter topic-map prompt for models with smaller context windows."""
+    system_prompt = "Return only one valid JSON object. No markdown. No prose."
+    user_prompt = f"""
+Create up to {num_topics} non-overlapping document topics in {language}.
+Use that language for every generated field, even if the prompt instructions are in English.
+
+Text excerpts:
+\"\"\"
+{sampled_text}
+\"\"\"
+
+Return exactly this JSON shape:
+{{
+  "topics": [
+    {{"name": "string", "summary": "string", "keywords": ["string"]}}
+  ]
+}}
+
+Rules:
+- Use only the excerpts.
+- Make topic names readable, not copied mid-sentence fragments.
+- No markdown or comments outside JSON.
+""".strip()
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
 def build_topic_generation_messages(
     document: str,
     topic: Topic,
@@ -373,6 +509,7 @@ def build_topic_generation_messages(
     user_prompt = f"""
 Generate exactly {questions_per_topic} Q/A items for the topic below.
 Language for question and answer: {language}.
+Use that language for every question and answer, even if the prompt instructions are in English.
 
 Output format (strict JSON object):
 {{
@@ -434,6 +571,7 @@ def build_topic_generation_messages_compact(
     system_prompt = "Return strict JSON object only."
     user_prompt = f"""
 Create {questions_per_topic} question-answer pairs in {language} from the topic context.
+Use that language for every question and answer, even if the prompt instructions are in English.
 
 Output:
 {{
@@ -490,7 +628,7 @@ def try_parse_json_payload(payload: str) -> dict[str, Any]:
                     except json.JSONDecodeError:
                         break
 
-    logger.warning("No se pudo parsear JSON del modelo; se retorna payload vacio.")
+    logger.debug("No se pudo parsear JSON del modelo; se retorna payload vacio.")
     return {"items": []}
 
 
@@ -617,6 +755,20 @@ def _extract_topics_candidates(payload: dict[str, Any]) -> list[Any]:
     for value in payload.values():
         if isinstance(value, list):
             return value
+
+    # Some models return {"Topic name": {"summary": ..., "keywords": [...]}}.
+    object_topics: list[dict[str, Any]] = []
+    for key, value in payload.items():
+        if key in {"items", "questions", "data", "results"}:
+            continue
+        if isinstance(value, dict):
+            topic_obj = dict(value)
+            topic_obj.setdefault("name", key)
+            object_topics.append(topic_obj)
+        elif isinstance(value, str) and len(value.strip()) >= 8:
+            object_topics.append({"name": key, "summary": value.strip(), "keywords": []})
+    if object_topics:
+        return object_topics
     return []
 
 
@@ -644,8 +796,22 @@ def parse_topics(payload: dict[str, Any]) -> list[Topic]:
                 or raw.get("tema")
                 or ""
             ).strip()
-            summary = str(raw.get("summary") or raw.get("description") or raw.get("resumen") or "").strip()
-            keywords_raw = raw.get("keywords") or raw.get("tags") or raw.get("palabras_clave") or []
+            summary = str(
+                raw.get("summary")
+                or raw.get("description")
+                or raw.get("resumen")
+                or raw.get("Definition")
+                or raw.get("definition")
+                or ""
+            ).strip()
+            keywords_raw = (
+                raw.get("keywords")
+                or raw.get("tags")
+                or raw.get("palabras_clave")
+                or raw.get("Key Topics Covered")
+                or raw.get("key_topics")
+                or []
+            )
         else:
             continue
 
@@ -662,6 +828,8 @@ def parse_topics(payload: dict[str, Any]) -> list[Topic]:
         else:
             keywords = [k.strip() for k in str(keywords_raw).split(",") if k.strip()]
         keywords = deduplicate_preserve_order(keywords)[:12]
+        if not keywords:
+            keywords = extract_keywords(f"{name} {summary}", max_keywords=8)
 
         topics.append(
             Topic(
@@ -688,6 +856,8 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
 
 def infer_topic_name_from_chunk(chunk_text: str, fallback_index: int) -> str:
     """Build a readable topic name from first meaningful line."""
+    cleaned = normalize_whitespace(chunk_text)
+    keyword_title = " / ".join(extract_keywords(cleaned, max_keywords=4)).title()
     for line in chunk_text.splitlines():
         line = line.strip().strip("-*#")
         if len(line) < 8:
@@ -696,7 +866,20 @@ def infer_topic_name_from_chunk(chunk_text: str, fallback_index: int) -> str:
         if len(line) <= 90:
             return line
         break
-    words = re.findall(r"[A-Za-zÀ-ÿ0-9_-]+", chunk_text)[:8]
+
+    sentence_candidates = re.split(r"(?<=[.!?])\s+", cleaned)
+    for sentence in sentence_candidates:
+        sentence = sentence.strip()
+        words = re.findall(r"[\w-]+", sentence, flags=re.UNICODE)
+        if len(words) < 4:
+            continue
+        if sentence[:1].islower() and keyword_title:
+            return keyword_title
+        if len(sentence) > 90:
+            sentence = " ".join(words[:10])
+        return truncate_text(sentence, 90).rstrip(" .,:;")
+
+    words = re.findall(r"[\w-]+", cleaned, flags=re.UNICODE)[:8]
     if words:
         return " ".join(words)
     return f"Topico {fallback_index + 1}"
@@ -775,6 +958,7 @@ def generate_items_for_topic(
     topic: Topic,
     topic_context: str,
     language: str,
+    document_language: str,
     questions_per_topic: int,
     temperature: float,
     existing_questions: Sequence[str],
@@ -796,7 +980,7 @@ def generate_items_for_topic(
     def _normalize_items(raw_items_local: list[Any]) -> list[dict[str, Any]]:
         normalized_local: list[dict[str, Any]] = []
         topic_context_lower = topic_context.lower()
-        for idx, item in enumerate(raw_items_local):
+        for idx, item in enumerate(raw_items_local[:questions_per_topic]):
             if not isinstance(item, dict):
                 continue
             question = str(item.get("question", "")).strip()
@@ -825,6 +1009,7 @@ def generate_items_for_topic(
                     "topic_id": topic.topic_id,
                     "topic_keywords": topic.keywords,
                     "document": document,
+                    "document_language": document_language,
                     "created_at": now_iso(),
                     "context_excerpt": topic_context[:500],
                 }
@@ -883,6 +1068,14 @@ def generate_items_for_topic(
         )
 
     normalized = _normalize_items(raw_items)
+    if not normalized:
+        last_raw = debug_attempts[-1]["raw_content"] if debug_attempts else ""
+        logger.warning(
+            "Items no parseables para '%s' / '%s'. Raw (300 chars): %s",
+            document,
+            topic.name,
+            last_raw[:300] if last_raw else "(vacio)",
+        )
     return normalized, {"raw_items": raw_items, "attempts": debug_attempts, "topic": topic.name}
 
 
@@ -967,6 +1160,64 @@ def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 
+def _assert_safe_cleanup_root(path: Path) -> Path:
+    """Resolve and validate cleanup roots before deleting generated artifacts."""
+    resolved = path.resolve()
+    allowed_roots = [
+        (BASE_DIR / "output").resolve(),
+        (BASE_DIR / "run_logs").resolve(),
+    ]
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        allowed = ", ".join(str(root) for root in allowed_roots)
+        raise RuntimeError(f"Ruta de limpieza no permitida: {resolved}. Permitidas: {allowed}")
+    return resolved
+
+
+def _remove_empty_dirs(root: Path) -> int:
+    """Remove empty directories below root, deepest first."""
+    removed = 0
+    if not root.exists():
+        return removed
+    dirs = [p for p in root.rglob("*") if p.is_dir()]
+    for directory in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def clean_generated_artifacts(output_path: Path, debug_dir: Path, dry_run: bool = False) -> dict[str, int]:
+    """Clean generated JSON/JSONL artifacts from output and run-log directories."""
+    roots = deduplicate_preserve_order([str(output_path.parent), str(debug_dir)])
+    files: list[Path] = []
+    for root_text in roots:
+        root = _assert_safe_cleanup_root(Path(root_text))
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.name == ".gitkeep":
+                continue
+            if path.suffix.lower() in {".json", ".jsonl"}:
+                files.append(path)
+
+    files = sorted(set(files))
+    if dry_run:
+        for path in files:
+            print(f"[DRY-RUN] borraria {path}")
+        return {"files": len(files), "dirs": 0}
+
+    for path in files:
+        path.unlink()
+
+    removed_dirs = 0
+    for root_text in roots:
+        root = _assert_safe_cleanup_root(Path(root_text))
+        removed_dirs += _remove_empty_dirs(root)
+    return {"files": len(files), "dirs": removed_dirs}
+
+
 def _package_version(name: str) -> str | None:
     """Return installed version for a package, or None if not available."""
     try:
@@ -1013,7 +1264,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR, help="Folder with PDF files.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Output JSONL path.")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Ollama model to generate QA pairs.")
-    parser.add_argument("--language", type=str, default=DEFAULT_LANGUAGE, help="Output language, e.g. es/en/ca.")
+    parser.add_argument(
+        "--language",
+        type=str,
+        default=DEFAULT_LANGUAGE,
+        help="Output language. Default: auto (detect per PDF). Use es/en/ca/etc. to force one.",
+    )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Chunk size in characters.")
     parser.add_argument("--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP, help="Chunk overlap in chars.")
     parser.add_argument(
@@ -1071,6 +1327,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Extract and chunk PDFs, print stats, and exit without calling Ollama.",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete generated JSON/JSONL files from --output parent and --debug-dir, then exit.",
+    )
+    parser.add_argument(
+        "--clean-dry-run",
+        action="store_true",
+        help="Show which generated files --clean would delete, without deleting them.",
     )
     return parser
 
@@ -1170,7 +1436,11 @@ def _run_dry_run(args: argparse.Namespace, pdf_files: Sequence[Path]) -> None:
         )
         total_chunks += len(chunks)
         total_chars += len(raw_text)
-        print(f"  - {pdf_path.name}: {len(raw_text):>8} chars -> {len(chunks):>3} chunks")
+        _, detected_language, language_scores = detect_document_language(raw_text)
+        print(
+            f"  - {pdf_path.name}: {len(raw_text):>8} chars -> {len(chunks):>3} chunks "
+            f"| idioma detectado: {detected_language} {language_scores}"
+        )
     estimated_topics = len(pdf_files) * args.num_topics
     estimated_calls = len(pdf_files) + estimated_topics  # 1 topic-map + N topic-gen per doc
     estimated_items = estimated_topics * args.questions_per_topic
@@ -1187,6 +1457,19 @@ def main() -> None:
     start_time = time.time()
     args = build_arg_parser().parse_args()
     validate_args(args)
+
+    if args.clean or args.clean_dry_run:
+        stats = clean_generated_artifacts(
+            output_path=args.output,
+            debug_dir=args.debug_dir,
+            dry_run=args.clean_dry_run,
+        )
+        action = "Archivos que se borrarian" if args.clean_dry_run else "Archivos borrados"
+        print(f"{action}: {stats['files']}")
+        if not args.clean_dry_run:
+            print(f"Directorios vacios borrados: {stats['dirs']}")
+        return
+
     split = parse_split(args.split)
 
     pdf_files = list_pdf_files(args.source_dir)
@@ -1208,6 +1491,7 @@ def main() -> None:
     total_chunks = 0
     total_topics = 0
     resumed_docs = 0
+    document_languages: dict[str, str] = {}
 
     for pdf_index, pdf_path in enumerate(pdf_files, start=1):
         print(f"[{pdf_index}/{len(pdf_files)}] Procesando documento: {pdf_path.name}")
@@ -1216,6 +1500,8 @@ def main() -> None:
             cached = load_checkpoint_items(args.debug_dir, pdf_path)
             if cached:
                 generated.extend(cached)
+                cached_language = str(cached[0].get("document_language", "unknown"))
+                document_languages[pdf_path.name] = cached_language
                 resumed_docs += 1
                 print(f"  - Resume: {len(cached)} items cargados desde checkpoint; salto generacion.")
                 continue
@@ -1223,6 +1509,8 @@ def main() -> None:
         doc_items: list[dict[str, Any]] = []
         raw_text = extract_text_from_pdf(pdf_path)
         full_context = truncate_text(raw_text, args.max_doc_context_chars)
+        generation_language, document_language, language_scores = resolve_generation_language(args.language, raw_text)
+        document_languages[pdf_path.name] = document_language
 
         chunks = build_chunks_from_text(
             raw_text=raw_text,
@@ -1236,11 +1524,12 @@ def main() -> None:
             print(f"  - Saltado: sin chunks validos en {pdf_path.name}")
             continue
         total_chunks += len(chunks)
+        print(f"  - Idioma: {document_language}")
 
         topic_messages = build_topic_map_messages(
             document=pdf_path.name,
             full_text=full_context,
-            language=args.language,
+            language=generation_language,
             num_topics=args.num_topics,
         )
         topics_payload, topics_raw_content = call_ollama_json(
@@ -1249,23 +1538,69 @@ def main() -> None:
             temperature=args.temperature,
             seed=args.seed,
         )
-        topics = parse_topics(topics_payload)
+        topics = parse_topics(topics_payload)[: args.num_topics]
 
         existing_questions = [str(item["question"]) for item in generated if item.get("document") == pdf_path.name]
 
         doc_debug = {
             "document": pdf_path.name,
+            "language": document_language,
+            "language_prompt": generation_language,
+            "language_scores": language_scores,
             "topic_map_payload": topics_payload,
             "topic_map_raw_content": topics_raw_content,
             "topic_map_strategy": "llm",
+            "topic_map_attempts": [
+                {
+                    "attempt": 1,
+                    "strategy": "full_document",
+                    "context_chars": len(full_context),
+                    "raw_content": topics_raw_content,
+                    "parsed_topics": len(topics),
+                }
+            ],
             "topics": [],
         }
+
+        if not topics:
+            compact_context = build_representative_document_context(
+                chunks=chunks,
+                max_chars=min(args.max_doc_context_chars, 18000),
+            )
+            compact_messages = build_topic_map_messages_compact(
+                document=pdf_path.name,
+                sampled_text=compact_context,
+                language=generation_language,
+                num_topics=args.num_topics,
+            )
+            topics_payload2, topics_raw_content2 = call_ollama_json(
+                model=args.model,
+                messages=compact_messages,
+                temperature=args.temperature,
+                seed=args.seed,
+            )
+            topics = parse_topics(topics_payload2)[: args.num_topics]
+            doc_debug["topic_map_attempts"].append(
+                {
+                    "attempt": 2,
+                    "strategy": "representative_excerpts",
+                    "context_chars": len(compact_context),
+                    "raw_content": topics_raw_content2,
+                    "parsed_topics": len(topics),
+                }
+            )
+            if topics:
+                doc_debug["topic_map_strategy"] = "llm_compact"
+                doc_debug["topic_map_payload"] = topics_payload2
+                doc_debug["topic_map_raw_content"] = topics_raw_content2
 
         if not topics:
             logger.warning(
                 "Topicos no parseables para '%s'. Raw (300 chars): %s",
                 pdf_path.name,
-                topics_raw_content[:300] if topics_raw_content else "(vacio)",
+                doc_debug["topic_map_attempts"][-1]["raw_content"][:300]
+                if doc_debug["topic_map_attempts"][-1]["raw_content"]
+                else "(vacio)",
             )
             topics = build_fallback_topics_from_chunks(chunks=chunks, num_topics=args.num_topics)
             doc_debug["topic_map_strategy"] = "fallback_from_chunks"
@@ -1307,7 +1642,8 @@ def main() -> None:
                 document=pdf_path.name,
                 topic=topic,
                 topic_context=topic_context,
-                language=args.language,
+                language=generation_language,
+                document_language=document_language,
                 questions_per_topic=args.questions_per_topic,
                 temperature=args.temperature,
                 existing_questions=existing_questions,
@@ -1347,6 +1683,7 @@ def main() -> None:
         "created_at": now_iso(),
         "model": args.model,
         "language": args.language,
+        "document_languages": document_languages,
         "source_dir": str(args.source_dir),
         "output": str(args.output),
         "pdf_count": len(pdf_files),
