@@ -91,6 +91,26 @@ def test_parse_topics_empty_payload():
     assert gd.parse_topics({}) == []
 
 
+# --- language detection -----------------------------------------------
+
+def test_detect_document_language_identifies_english():
+    text = "The operating system manages computer hardware and software resources."
+    code, name, scores = gd.detect_document_language(text)
+    assert code == "en"
+    assert name == "English"
+    assert scores["en"] > scores["es"]
+
+
+def test_resolve_generation_language_auto_builds_prompt_language():
+    prompt_language, document_language, scores = gd.resolve_generation_language(
+        "auto",
+        "El sistema operativo gestiona los recursos de la computadora.",
+    )
+    assert document_language == "es"
+    assert "Spanish" in prompt_language
+    assert scores["es"] > scores["en"]
+
+
 # --- deduplicate_items ------------------------------------------------
 
 def _item(question: str) -> dict:
@@ -194,6 +214,7 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
     )
     assert items[0]["context_source_verified"] is True
     assert items[0]["context_source"] == "schedules processes"
+    assert items[0]["document_language"] == "es"
     assert items[0]["difficulty"] == "hard"
 
 

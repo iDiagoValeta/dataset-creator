@@ -958,14 +958,15 @@ def generate_items_for_topic(
     topic: Topic,
     topic_context: str,
     language: str,
-    document_language: str,
     questions_per_topic: int,
     temperature: float,
     existing_questions: Sequence[str],
     seed: int | None = None,
+    document_language: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Generate normalized Q/A items for one topic."""
     debug_attempts: list[dict[str, Any]] = []
+    item_document_language = document_language or language
 
     def _extract_raw_items(parsed_obj: dict[str, Any]) -> list[Any]:
         raw_local = parsed_obj.get("items", [])
@@ -1009,7 +1010,7 @@ def generate_items_for_topic(
                     "topic_id": topic.topic_id,
                     "topic_keywords": topic.keywords,
                     "document": document,
-                    "document_language": document_language,
+                    "document_language": item_document_language,
                     "created_at": now_iso(),
                     "context_excerpt": topic_context[:500],
                 }
@@ -1643,11 +1644,11 @@ def main() -> None:
                 topic=topic,
                 topic_context=topic_context,
                 language=generation_language,
-                document_language=document_language,
                 questions_per_topic=args.questions_per_topic,
                 temperature=args.temperature,
                 existing_questions=existing_questions,
                 seed=args.seed,
+                document_language=document_language,
             )
             topic_elapsed = time.time() - topic_t0
             generated.extend(topic_items)
