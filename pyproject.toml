@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "ruff>=0.5.0",
 ]
 
 [project.scripts]
@@ -35,3 +36,18 @@ modules = ["generate_dataset"]
 testpaths = ["tests"]
 pythonpath = ["pipeline"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["pipeline/output", "pipeline/run_logs", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length handled softly
+    "B008",  # argparse default=Path(...) is fine here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

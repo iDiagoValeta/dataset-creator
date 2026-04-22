@@ -40,6 +40,7 @@ pipeline/
   output/
   run_logs/
 tests/
+.github/workflows/ci.yml
 pyproject.toml
 .env.example
 ```

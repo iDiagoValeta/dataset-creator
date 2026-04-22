@@ -52,17 +52,16 @@ import platform
 import random
 import re
 import subprocess
-import sys
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
 
 import ollama
 from pypdf import PdfReader
-
 
 # ----------------------------------------------------------------------
 # SECTION 2: OPTIONAL DEPENDENCIES
@@ -139,20 +138,22 @@ class Topic:
     topic_id: str
     name: str
     summary: str
-    keywords: List[str]
+    keywords: list[str]
 
 
 # ----------------------------------------------------------------------
 # SECTION 4: UTILITIES
 # ----------------------------------------------------------------------
 
-def parse_split(split_text: str) -> Tuple[float, float, float]:
+def parse_split(split_text: str) -> tuple[float, float, float]:
     """Parse and validate split ratios in 'train,val,test' format."""
     parts = [p.strip() for p in split_text.split(",")]
     if len(parts) != 3:
         raise ValueError("Split debe tener 3 valores: train,val,test")
 
     train_ratio, val_ratio, test_ratio = (float(p) for p in parts)
+    if min(train_ratio, val_ratio, test_ratio) < 0:
+        raise ValueError("Los ratios de split no pueden ser negativos")
     total = train_ratio + val_ratio + test_ratio
     if total <= 0:
         raise ValueError("La suma del split debe ser > 0")
@@ -160,7 +161,7 @@ def parse_split(split_text: str) -> Tuple[float, float, float]:
     return train_ratio / total, val_ratio / total, test_ratio / total
 
 
-def list_pdf_files(source_dir: Path) -> List[Path]:
+def list_pdf_files(source_dir: Path) -> list[Path]:
     """Return sorted PDF files from source directory."""
     if not source_dir.exists():
         raise FileNotFoundError(f"No existe carpeta de PDFs: {source_dir}")
@@ -198,7 +199,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _sample_existing_questions(existing: Sequence[str], limit: int) -> List[str]:
+def _sample_existing_questions(existing: Sequence[str], limit: int) -> list[str]:
     """Blend last-N with a deterministic sample of older questions to avoid recency bias."""
     if len(existing) <= limit:
         return list(existing)
@@ -213,10 +214,10 @@ def _sample_existing_questions(existing: Sequence[str], limit: int) -> List[str]
     return older + recent
 
 
-def deduplicate_preserve_order(values: Sequence[str]) -> List[str]:
+def deduplicate_preserve_order(values: Sequence[str]) -> list[str]:
     """Remove duplicates preserving first appearance."""
     seen = set()
-    out: List[str] = []
+    out: list[str] = []
     for value in values:
         clean = value.strip()
         if not clean:
@@ -263,13 +264,13 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         return ""
 
 
-def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     """Split text into overlapping character chunks."""
     cleaned = normalize_whitespace(text)
     if not cleaned:
         return []
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     step = max(1, chunk_size - chunk_overlap)
     for start in range(0, len(cleaned), step):
         chunk = cleaned[start : start + chunk_size].strip()
@@ -286,10 +287,10 @@ def build_chunks_from_text(
     document_stem: str,
     chunk_size: int,
     chunk_overlap: int,
-    max_chunks: Optional[int],
-) -> List[Chunk]:
+    max_chunks: int | None,
+) -> list[Chunk]:
     """Chunk already-extracted text into Chunk objects."""
-    chunks: List[Chunk] = []
+    chunks: list[Chunk] = []
     part_chunks = chunk_text(raw_text, chunk_size, chunk_overlap)
     for index, text in enumerate(part_chunks):
         chunk_id = f"{document_stem}-chunk-{index:04d}"
@@ -314,7 +315,7 @@ def truncate_text(text: str, max_chars: int) -> str:
     return partial
 
 
-def build_topic_map_messages(document: str, full_text: str, language: str, num_topics: int) -> List[Dict[str, str]]:
+def build_topic_map_messages(document: str, full_text: str, language: str, num_topics: int) -> list[dict[str, str]]:
     """Create prompt messages to infer a non-overlapping topic map."""
     system_prompt = (
         "You are an expert dataset designer for educational and technical corpora. "
@@ -359,7 +360,7 @@ def build_topic_generation_messages(
     language: str,
     questions_per_topic: int,
     existing_questions: Sequence[str],
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """Create prompt messages to generate topic-specific non-repeated Q/A items."""
     system_prompt = (
         "You generate high-quality supervised Q/A datasets from source text. "
@@ -428,7 +429,7 @@ def build_topic_generation_messages_compact(
     topic_context: str,
     language: str,
     questions_per_topic: int,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """Compact fallback prompt to maximize schema adherence."""
     system_prompt = "Return strict JSON object only."
     user_prompt = f"""
@@ -462,7 +463,7 @@ Context:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
-def try_parse_json_payload(payload: str) -> Dict[str, Any]:
+def try_parse_json_payload(payload: str) -> dict[str, Any]:
     """Parse model output into dict with an 'items' list."""
     stripped = (payload or "").strip()
     try:
@@ -527,19 +528,20 @@ def verify_ollama_model(model: str) -> None:
 
 def call_ollama_json(
     model: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     temperature: float,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     max_retries: int = DEFAULT_OLLAMA_RETRIES,
     backoff_secs: float = DEFAULT_OLLAMA_RETRY_BACKOFF,
-) -> Tuple[Dict[str, Any], str]:
+) -> tuple[dict[str, Any], str]:
     """Execute Ollama chat call expecting a JSON object, with retry on transient errors."""
-    options: Dict[str, Any] = {"temperature": temperature}
+    options: dict[str, Any] = {"temperature": temperature}
     if seed is not None:
         options["seed"] = seed
 
-    last_error: Optional[BaseException] = None
+    last_error: BaseException | None = None
     for attempt in range(1, max_retries + 1):
+        call_start = time.time()
         try:
             client = ollama.Client(timeout=DEFAULT_OLLAMA_TIMEOUT)
             response = client.chat(
@@ -549,6 +551,8 @@ def call_ollama_json(
                 options=options,
                 think=False,
             )
+            elapsed = time.time() - call_start
+            logger.debug("Ollama '%s' OK en %.2fs (intento %s)", model, elapsed, attempt)
             content = response.get("message", {}).get("content", "")
             return try_parse_json_payload(content), content
         except ollama.ResponseError as exc:
@@ -557,10 +561,11 @@ def call_ollama_json(
                          model, attempt, max_retries, exc)
             return {"items": []}, ""
         except Exception as exc:
+            elapsed = time.time() - call_start
             last_error = exc
             logger.warning(
-                "Error transitorio llamando Ollama '%s' (intento %s/%s): %s",
-                model, attempt, max_retries, exc,
+                "Error transitorio llamando Ollama '%s' (intento %s/%s tras %.2fs): %s",
+                model, attempt, max_retries, elapsed, exc,
             )
             if attempt < max_retries:
                 time.sleep(backoff_secs * attempt)
@@ -569,7 +574,7 @@ def call_ollama_json(
     return {"items": []}, ""
 
 
-def _extract_topics_candidates(payload: Dict[str, Any]) -> List[Any]:
+def _extract_topics_candidates(payload: dict[str, Any]) -> list[Any]:
     """Find topic candidates under common keys used by different models."""
     if not isinstance(payload, dict):
         return []
@@ -594,9 +599,9 @@ def _extract_topics_candidates(payload: Dict[str, Any]) -> List[Any]:
     return []
 
 
-def parse_topics(payload: Dict[str, Any]) -> List[Topic]:
+def parse_topics(payload: dict[str, Any]) -> list[Topic]:
     """Normalize topic payload into typed topics."""
-    topics: List[Topic] = []
+    topics: list[Topic] = []
     raw_topics = _extract_topics_candidates(payload)
     if not raw_topics:
         return []
@@ -648,10 +653,10 @@ def parse_topics(payload: Dict[str, Any]) -> List[Topic]:
     return topics
 
 
-def extract_keywords(text: str, max_keywords: int = 8) -> List[str]:
+def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
     """Extract naive keywords from a text snippet without external deps."""
     words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9_-]{3,}", text.lower())
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for w in words:
         if w in STOPWORDS:
             continue
@@ -676,14 +681,14 @@ def infer_topic_name_from_chunk(chunk_text: str, fallback_index: int) -> str:
     return f"Topico {fallback_index + 1}"
 
 
-def build_fallback_topics_from_chunks(chunks: Sequence[Chunk], num_topics: int) -> List[Topic]:
+def build_fallback_topics_from_chunks(chunks: Sequence[Chunk], num_topics: int) -> list[Topic]:
     """Create deterministic topics from chunk slices when LLM topic map fails."""
     if not chunks:
         return []
     count = max(1, min(num_topics, len(chunks)))
     step = max(1, len(chunks) // count)
     selected_indices = list(range(0, len(chunks), step))[:count]
-    topics: List[Topic] = []
+    topics: list[Topic] = []
     for i, chunk_idx in enumerate(selected_indices):
         chunk = chunks[chunk_idx]
         name = infer_topic_name_from_chunk(chunk.text, i)
@@ -725,7 +730,7 @@ def build_topic_context(
     scored = [(score_chunk_for_topic(chunk, topic), chunk) for chunk in chunks]
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    selected: List[str] = []
+    selected: list[str] = []
     total = 0
     fallback_mode = all(score <= 0 for score, _ in scored)
 
@@ -752,12 +757,12 @@ def generate_items_for_topic(
     questions_per_topic: int,
     temperature: float,
     existing_questions: Sequence[str],
-    seed: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    seed: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Generate normalized Q/A items for one topic."""
-    debug_attempts: List[Dict[str, Any]] = []
+    debug_attempts: list[dict[str, Any]] = []
 
-    def _extract_raw_items(parsed_obj: Dict[str, Any]) -> List[Any]:
+    def _extract_raw_items(parsed_obj: dict[str, Any]) -> list[Any]:
         raw_local = parsed_obj.get("items", [])
         if not isinstance(raw_local, list):
             for alt_key in ("questions", "preguntas", "data", "results"):
@@ -767,8 +772,8 @@ def generate_items_for_topic(
                     break
         return raw_local if isinstance(raw_local, list) else []
 
-    def _normalize_items(raw_items_local: List[Any]) -> List[Dict[str, Any]]:
-        normalized_local: List[Dict[str, Any]] = []
+    def _normalize_items(raw_items_local: list[Any]) -> list[dict[str, Any]]:
+        normalized_local: list[dict[str, Any]] = []
         topic_context_lower = topic_context.lower()
         for idx, item in enumerate(raw_items_local):
             if not isinstance(item, dict):
@@ -868,15 +873,15 @@ def _question_bigrams(text: str) -> frozenset:
         if w not in STOPWORDS
     ]
     if len(words) >= 2:
-        return frozenset(zip(words, words[1:]))
+        return frozenset(zip(words, words[1:], strict=False))
     return frozenset(words)
 
 
-def deduplicate_items(items: Iterable[Dict[str, Any]], semantic_threshold: float = 0.6) -> List[Dict[str, Any]]:
+def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float = 0.6) -> list[dict[str, Any]]:
     """Drop exact and near-semantic duplicated questions."""
     seen_exact = set()
-    seen_bigrams: List[frozenset] = []
-    unique: List[Dict[str, Any]] = []
+    seen_bigrams: list[frozenset] = []
+    unique: list[dict[str, Any]] = []
     for item in items:
         question = str(item.get("question", ""))
         signature = sanitize_question(question)
@@ -906,7 +911,7 @@ def deduplicate_items(items: Iterable[Dict[str, Any]], semantic_threshold: float
 # SECTION 8: EXPORT AND SPLITTING
 # ----------------------------------------------------------------------
 
-def write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
+def write_jsonl(path: Path, rows: Sequence[dict[str, Any]]) -> None:
     """Write rows as JSON Lines."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -915,10 +920,10 @@ def write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 
 
 def split_rows(
-    rows: Sequence[Dict[str, Any]],
-    split: Tuple[float, float, float],
+    rows: Sequence[dict[str, Any]],
+    split: tuple[float, float, float],
     seed: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Split rows into train/val/test using deterministic shuffle."""
     train_ratio, val_ratio, test_ratio = split
     shuffled = list(rows)
@@ -934,14 +939,14 @@ def split_rows(
     return train_rows, val_rows, test_rows
 
 
-def write_metadata(path: Path, metadata: Dict[str, Any]) -> None:
+def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
     """Write metadata as pretty JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 
-def _package_version(name: str) -> Optional[str]:
+def _package_version(name: str) -> str | None:
     """Return installed version for a package, or None if not available."""
     try:
         return importlib_metadata.version(name)
@@ -949,7 +954,7 @@ def _package_version(name: str) -> Optional[str]:
         return None
 
 
-def _current_git_commit() -> Optional[str]:
+def _current_git_commit() -> str | None:
     """Return short git commit for the repo, or None if git is unavailable."""
     try:
         out = subprocess.check_output(
@@ -963,7 +968,7 @@ def _current_git_commit() -> Optional[str]:
         return None
 
 
-def build_reproducibility_info() -> Dict[str, Any]:
+def build_reproducibility_info() -> dict[str, Any]:
     """Collect runtime/version info for metadata reproducibility."""
     return {
         "python_version": platform.python_version(),
@@ -1028,7 +1033,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--only-doc",
         type=str,
         default=None,
-        help="Process only the PDF whose filename (or stem) matches this value.",
+        help="Process only the PDFs whose filename/stem match this value "
+             "(comma-separated list for multiple).",
     )
     parser.add_argument(
         "--skip-model-check",
@@ -1040,12 +1046,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip documents that already have a non-empty checkpoint file in --debug-dir.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Extract and chunk PDFs, print stats, and exit without calling Ollama.",
+    )
     return parser
 
 
 def validate_args(args: argparse.Namespace) -> None:
     """Validate CLI args before starting expensive operations."""
-    errors: List[str] = []
+    errors: list[str] = []
     if args.chunk_overlap >= args.chunk_size:
         errors.append(
             f"--chunk-overlap ({args.chunk_overlap}) debe ser < --chunk-size ({args.chunk_size})"
@@ -1068,12 +1079,12 @@ def _checkpoint_path(debug_dir: Path, pdf_path: Path) -> Path:
     return debug_dir / f"{pdf_path.stem}.items.jsonl"
 
 
-def load_checkpoint_items(debug_dir: Path, pdf_path: Path) -> List[Dict[str, Any]]:
+def load_checkpoint_items(debug_dir: Path, pdf_path: Path) -> list[dict[str, Any]]:
     """Load previously generated items for a document, or empty list if absent."""
     path = _checkpoint_path(debug_dir, pdf_path)
     if not path.exists() or path.stat().st_size == 0:
         return []
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -1086,22 +1097,68 @@ def load_checkpoint_items(debug_dir: Path, pdf_path: Path) -> List[Dict[str, Any
     return items
 
 
-def save_checkpoint_items(debug_dir: Path, pdf_path: Path, items: Sequence[Dict[str, Any]]) -> None:
+def save_checkpoint_items(debug_dir: Path, pdf_path: Path, items: Sequence[dict[str, Any]]) -> None:
     """Persist the items generated for a document (idempotent overwrite)."""
     path = _checkpoint_path(debug_dir, pdf_path)
     write_jsonl(path, list(items))
 
 
-def filter_pdfs_by_only_doc(pdfs: Sequence[Path], only_doc: Optional[str]) -> List[Path]:
-    """Keep only the PDF matching `only_doc` (filename or stem, case-insensitive)."""
+def filter_pdfs_by_only_doc(pdfs: Sequence[Path], only_doc: str | None) -> list[Path]:
+    """Keep only the PDFs matching `only_doc` (comma-separated filenames or stems, case-insensitive)."""
     if not only_doc:
         return list(pdfs)
-    target = only_doc.strip().lower()
-    matched = [p for p in pdfs if p.name.lower() == target or p.stem.lower() == target]
-    if not matched:
+    targets = [t.strip().lower() for t in only_doc.split(",") if t.strip()]
+    if not targets:
+        return list(pdfs)
+
+    matched: list[Path] = []
+    seen: set = set()
+    missing: list[str] = []
+    for target in targets:
+        hits = [p for p in pdfs if p.name.lower() == target or p.stem.lower() == target]
+        if not hits:
+            missing.append(target)
+            continue
+        for hit in hits:
+            if hit not in seen:
+                seen.add(hit)
+                matched.append(hit)
+
+    if missing:
         available = ", ".join(p.name for p in pdfs) or "(ninguno)"
-        raise RuntimeError(f"--only-doc='{only_doc}' no encontrado. Disponibles: {available}")
+        raise RuntimeError(
+            f"--only-doc: no se encontraron {missing}. Disponibles: {available}"
+        )
     return matched
+
+
+def _run_dry_run(args: argparse.Namespace, pdf_files: Sequence[Path]) -> None:
+    """Print how much work a real run would do, without calling Ollama."""
+    print(f"[DRY-RUN] {len(pdf_files)} PDF(s) a procesar con modelo '{args.model}'")
+    total_chunks = 0
+    total_chars = 0
+    for pdf_path in pdf_files:
+        raw_text = extract_text_from_pdf(pdf_path)
+        chunks = build_chunks_from_text(
+            raw_text=raw_text,
+            document_name=pdf_path.name,
+            document_stem=pdf_path.stem,
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.chunk_overlap,
+            max_chunks=args.max_chunks,
+        )
+        total_chunks += len(chunks)
+        total_chars += len(raw_text)
+        print(f"  - {pdf_path.name}: {len(raw_text):>8} chars -> {len(chunks):>3} chunks")
+    estimated_topics = len(pdf_files) * args.num_topics
+    estimated_calls = len(pdf_files) + estimated_topics  # 1 topic-map + N topic-gen per doc
+    estimated_items = estimated_topics * args.questions_per_topic
+    print("")
+    print(f"Totales: {total_chars} chars, {total_chunks} chunks")
+    print(
+        f"Estimacion maxima: ~{estimated_topics} topicos, ~{estimated_items} items, "
+        f"~{estimated_calls} llamadas a Ollama."
+    )
 
 
 def main() -> None:
@@ -1117,12 +1174,16 @@ def main() -> None:
 
     pdf_files = filter_pdfs_by_only_doc(pdf_files, args.only_doc)
 
+    if args.dry_run:
+        _run_dry_run(args, pdf_files)
+        return
+
     if not args.skip_model_check:
         verify_ollama_model(args.model)
 
     args.debug_dir.mkdir(parents=True, exist_ok=True)
 
-    generated: List[Dict[str, Any]] = []
+    generated: list[dict[str, Any]] = []
     total_chunks = 0
     total_topics = 0
     resumed_docs = 0
@@ -1138,7 +1199,7 @@ def main() -> None:
                 print(f"  - Resume: {len(cached)} items cargados desde checkpoint; salto generacion.")
                 continue
 
-        doc_items: List[Dict[str, Any]] = []
+        doc_items: list[dict[str, Any]] = []
         raw_text = extract_text_from_pdf(pdf_path)
         full_context = truncate_text(raw_text, args.max_doc_context_chars)
 
@@ -1219,6 +1280,7 @@ def main() -> None:
             if len(topic_context) < MIN_TOPIC_CONTEXT_CHARS and len(full_context) > len(topic_context):
                 topic_context = truncate_text(full_context, min(args.max_topic_context_chars, len(full_context)))
 
+            topic_t0 = time.time()
             topic_items, topic_debug = generate_items_for_topic(
                 model=args.model,
                 document=pdf_path.name,
@@ -1230,10 +1292,11 @@ def main() -> None:
                 existing_questions=existing_questions,
                 seed=args.seed,
             )
+            topic_elapsed = time.time() - topic_t0
             generated.extend(topic_items)
             doc_items.extend(topic_items)
             existing_questions.extend(item["question"] for item in topic_items)
-            print(f" -> {len(topic_items)} items")
+            print(f" -> {len(topic_items)} items ({topic_elapsed:.1f}s)")
             doc_debug["topics"].append(
                 {
                     "topic_id": topic.topic_id,

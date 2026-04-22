@@ -1,10 +1,8 @@
 """Unit tests for pure functions in generate_dataset."""
 from pathlib import Path
 
-import pytest
-
 import generate_dataset as gd
-
+import pytest
 
 # --- parse_split ------------------------------------------------------
 
@@ -23,6 +21,11 @@ def test_parse_split_rejects_wrong_arity():
 def test_parse_split_rejects_zero_total():
     with pytest.raises(ValueError):
         gd.parse_split("0,0,0")
+
+
+def test_parse_split_rejects_negative_component():
+    with pytest.raises(ValueError, match="negativos"):
+        gd.parse_split("0.8,-0.1,0.3")
 
 
 # --- chunk_text -------------------------------------------------------
@@ -136,6 +139,23 @@ def test_filter_pdfs_by_only_doc_none_returns_all(tmp_path: Path):
     pdf = tmp_path / "A.pdf"
     pdf.write_bytes(b"%PDF-1.4")
     assert gd.filter_pdfs_by_only_doc([pdf], None) == [pdf]
+
+
+def test_filter_pdfs_by_only_doc_multiple(tmp_path: Path):
+    a = tmp_path / "A.pdf"
+    b = tmp_path / "B.pdf"
+    c = tmp_path / "C.pdf"
+    for p in (a, b, c):
+        p.write_bytes(b"%PDF-1.4")
+    selected = gd.filter_pdfs_by_only_doc([a, b, c], "a,c")
+    assert selected == [a, c]
+
+
+def test_filter_pdfs_by_only_doc_multiple_partial_miss_raises(tmp_path: Path):
+    a = tmp_path / "A.pdf"
+    a.write_bytes(b"%PDF-1.4")
+    with pytest.raises(RuntimeError):
+        gd.filter_pdfs_by_only_doc([a], "a,ghost")
 
 
 # --- context_source validation ---------------------------------------

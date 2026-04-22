@@ -24,6 +24,8 @@ dataset-creator/
 ├── README.md
 ├── pyproject.toml
 ├── .env.example
+├── .github/
+│   └── workflows/ci.yml
 ├── pipeline/
 │   ├── generate_dataset.py
 │   ├── requirements.txt
@@ -103,15 +105,18 @@ python pipeline/generate_dataset.py --language es --split 0.7,0.15,0.15
 python pipeline/generate_dataset.py --language ca   # Valencian / Catalan output
 python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/thesis_es.jsonl
 python pipeline/generate_dataset.py --only-doc Operating_system.pdf
+python pipeline/generate_dataset.py --only-doc a.pdf,b.pdf
 python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
 python pipeline/generate_dataset.py --resume
+python pipeline/generate_dataset.py --dry-run
 ```
 
 Notable flags:
 
-- `--only-doc <name>`: process a single PDF (matched by filename or stem, case-insensitive).
+- `--only-doc <names>`: process only the matching PDFs (filename or stem, case-insensitive). Comma-separated for multiple (e.g. `a.pdf,b.pdf`).
 - `--skip-model-check`: skip the initial `ollama.list()` availability check.
 - `--resume`: skip documents that already have a non-empty checkpoint file in `--debug-dir` (`<stem>.items.jsonl`).
+- `--dry-run`: extract and chunk PDFs, print stats (chunks, estimated Ollama calls and items), and exit without calling the model. Useful for sizing a run.
 
 ## Checkpointing
 
@@ -160,9 +165,12 @@ Each JSONL line contains:
 - `type` and `difficulty` normalization against out-of-schema model outputs.
 - Substring verification of `context_source` (exposed as `context_source_verified`).
 
-## Tests
+## Tests and lint
 
 ```bash
 pip install -r pipeline/requirements-dev.txt
-pytest tests/ -q
+pytest           # uses config in pyproject.toml
+ruff check .
 ```
+
+Continuous integration runs both on `push` and `pull_request` against `main` via `.github/workflows/ci.yml` on Python 3.10 / 3.11 / 3.12.
