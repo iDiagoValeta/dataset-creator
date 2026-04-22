@@ -48,13 +48,17 @@ import argparse
 import json
 import logging
 import os
+import platform
 import random
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import ollama
 from pypdf import PdfReader
@@ -94,7 +98,10 @@ DEFAULT_MAX_DOC_CONTEXT_CHARS = int(os.getenv("DATASET_MAX_DOC_CONTEXT_CHARS", "
 DEFAULT_MAX_TOPIC_CONTEXT_CHARS = int(os.getenv("DATASET_MAX_TOPIC_CONTEXT_CHARS", "24000"))
 DEFAULT_OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT_SECS", "300"))
 MIN_TOPIC_CONTEXT_CHARS = 9000
-VALID_TYPES = {"factual", "conceptual", "inference", "compare", "definition", "reasoning"}
+VALID_TYPES = {"factual", "conceptual", "inference", "compare", "definition"}
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+DEFAULT_OLLAMA_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "3"))
+DEFAULT_OLLAMA_RETRY_BACKOFF = float(os.getenv("OLLAMA_RETRY_BACKOFF_SECS", "2.0"))
 _STOPWORDS_SET = {
     "cual",
     "como",
@@ -285,22 +292,22 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
     return chunks
 
 
-def build_chunks_from_pdfs(
-    pdf_paths: Sequence[Path],
+def build_chunks_from_text(
+    raw_text: str,
+    document_name: str,
+    document_stem: str,
     chunk_size: int,
     chunk_overlap: int,
-    max_chunks: int | None,
+    max_chunks: Optional[int],
 ) -> List[Chunk]:
-    """Extract and chunk all PDFs into a flat list of Chunk objects."""
+    """Chunk already-extracted text into Chunk objects."""
     chunks: List[Chunk] = []
-    for pdf_path in pdf_paths:
-        raw_text = extract_text_from_pdf(pdf_path)
-        part_chunks = chunk_text(raw_text, chunk_size, chunk_overlap)
-        for index, text in enumerate(part_chunks):
-            chunk_id = f"{pdf_path.stem}-chunk-{index:04d}"
-            chunks.append(Chunk(chunk_id=chunk_id, document=pdf_path.name, text=text))
-            if max_chunks is not None and len(chunks) >= max_chunks:
-                return chunks
+    part_chunks = chunk_text(raw_text, chunk_size, chunk_overlap)
+    for index, text in enumerate(part_chunks):
+        chunk_id = f"{document_stem}-chunk-{index:04d}"
+        chunks.append(Chunk(chunk_id=chunk_id, document=document_name, text=text))
+        if max_chunks is not None and len(chunks) >= max_chunks:
+            break
     return chunks
 
 
@@ -501,27 +508,75 @@ def try_parse_json_payload(payload: str) -> Dict[str, Any]:
 # SECTION 7: OLLAMA GENERATION PIPELINE
 # ----------------------------------------------------------------------
 
+def verify_ollama_model(model: str) -> None:
+    """Abort early if Ollama is unreachable or the requested model is missing."""
+    try:
+        client = ollama.Client(timeout=DEFAULT_OLLAMA_TIMEOUT)
+        listing = client.list()
+    except Exception as exc:
+        raise RuntimeError(
+            f"No se pudo conectar con Ollama. ¿Está el servicio corriendo? Detalle: {exc}"
+        ) from exc
+
+    models_payload = listing.get("models", []) if isinstance(listing, dict) else []
+    available = set()
+    for entry in models_payload:
+        name = entry.get("model") or entry.get("name") if isinstance(entry, dict) else None
+        if name:
+            available.add(name)
+            available.add(name.split(":", 1)[0])
+
+    if model in available or model.split(":", 1)[0] in available:
+        return
+
+    hint = ", ".join(sorted(available)) or "(ninguno)"
+    raise RuntimeError(
+        f"Modelo '{model}' no disponible en Ollama. Modelos detectados: {hint}. "
+        f"Instálalo con: ollama pull {model}"
+    )
+
+
 def call_ollama_json(
     model: str,
     messages: List[Dict[str, str]],
     temperature: float,
+    seed: Optional[int] = None,
+    max_retries: int = DEFAULT_OLLAMA_RETRIES,
+    backoff_secs: float = DEFAULT_OLLAMA_RETRY_BACKOFF,
 ) -> Tuple[Dict[str, Any], str]:
-    """Execute Ollama chat call expecting a JSON object."""
-    try:
-        client = ollama.Client(timeout=DEFAULT_OLLAMA_TIMEOUT)
-        response = client.chat(
-            model=model,
-            messages=messages,
-            format="json",
-            options={"temperature": temperature},
-            think=False,
-        )
-        content = response.get("message", {}).get("content", "")
-        return try_parse_json_payload(content), content
-    except ollama.ResponseError as exc:
-        logger.error("Ollama ResponseError en modelo '%s': %s", model, exc)
-    except Exception as exc:
-        logger.error("Error de red/timeout al llamar Ollama '%s': %s", model, exc)
+    """Execute Ollama chat call expecting a JSON object, with retry on transient errors."""
+    options: Dict[str, Any] = {"temperature": temperature}
+    if seed is not None:
+        options["seed"] = seed
+
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            client = ollama.Client(timeout=DEFAULT_OLLAMA_TIMEOUT)
+            response = client.chat(
+                model=model,
+                messages=messages,
+                format="json",
+                options=options,
+                think=False,
+            )
+            content = response.get("message", {}).get("content", "")
+            return try_parse_json_payload(content), content
+        except ollama.ResponseError as exc:
+            # 4xx-like errors are usually not transient (bad prompt, missing model).
+            logger.error("Ollama ResponseError en modelo '%s' (intento %s/%s): %s",
+                         model, attempt, max_retries, exc)
+            return {"items": []}, ""
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Error transitorio llamando Ollama '%s' (intento %s/%s): %s",
+                model, attempt, max_retries, exc,
+            )
+            if attempt < max_retries:
+                time.sleep(backoff_secs * attempt)
+
+    logger.error("Ollama falló tras %s intentos: %s", max_retries, last_error)
     return {"items": []}, ""
 
 
@@ -742,6 +797,7 @@ def generate_items_for_topic(
     questions_per_topic: int,
     temperature: float,
     existing_questions: Sequence[str],
+    seed: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Generate normalized Q/A items for one topic."""
     debug_attempts: List[Dict[str, Any]] = []
@@ -758,6 +814,7 @@ def generate_items_for_topic(
 
     def _normalize_items(raw_items_local: List[Any]) -> List[Dict[str, Any]]:
         normalized_local: List[Dict[str, Any]] = []
+        topic_context_lower = topic_context.lower()
         for idx, item in enumerate(raw_items_local):
             if not isinstance(item, dict):
                 continue
@@ -767,15 +824,22 @@ def generate_items_for_topic(
                 continue
             raw_type = str(item.get("type", "factual")).strip().lower()
             item_type = raw_type if raw_type in VALID_TYPES else "factual"
-            context_source = str(item.get("context_source", "")).strip()[:300] or topic_context[:300]
+            raw_difficulty = str(item.get("difficulty", "medium")).strip().lower()
+            difficulty = raw_difficulty if raw_difficulty in VALID_DIFFICULTIES else "medium"
+
+            raw_source = str(item.get("context_source", "")).strip()[:300]
+            context_verified = bool(raw_source) and raw_source.lower() in topic_context_lower
+            context_source = raw_source if context_verified else topic_context[:300]
+
             normalized_local.append(
                 {
                     "id": f"{document}-{topic.topic_id}-qa-{idx:02d}",
                     "question": question,
                     "answer": answer,
                     "type": item_type,
-                    "difficulty": str(item.get("difficulty", "medium")).strip().lower(),
+                    "difficulty": difficulty,
                     "context_source": context_source,
+                    "context_source_verified": context_verified,
                     "topic": topic.name,
                     "topic_id": topic.topic_id,
                     "topic_keywords": topic.keywords,
@@ -795,7 +859,7 @@ def generate_items_for_topic(
         questions_per_topic=questions_per_topic,
         existing_questions=existing_questions,
     )
-    parsed, raw_content = call_ollama_json(model=model, messages=messages, temperature=temperature)
+    parsed, raw_content = call_ollama_json(model=model, messages=messages, temperature=temperature, seed=seed)
     raw_items = _extract_raw_items(parsed)
     debug_attempts.append({"attempt": 1, "raw_content": raw_content, "parsed": parsed, "raw_items_count": len(raw_items)})
 
@@ -808,7 +872,7 @@ def generate_items_for_topic(
             language=language,
             questions_per_topic=questions_per_topic,
         )
-        parsed2, raw_content2 = call_ollama_json(model=model, messages=compact_messages, temperature=temperature)
+        parsed2, raw_content2 = call_ollama_json(model=model, messages=compact_messages, temperature=temperature, seed=seed)
         raw_items = _extract_raw_items(parsed2)
         debug_attempts.append(
             {"attempt": 2, "raw_content": raw_content2, "parsed": parsed2, "raw_items_count": len(raw_items)}
@@ -831,7 +895,7 @@ def generate_items_for_topic(
                 ),
             },
         ]
-        parsed3, raw_content3 = call_ollama_json(model=model, messages=salvage_messages, temperature=temperature)
+        parsed3, raw_content3 = call_ollama_json(model=model, messages=salvage_messages, temperature=temperature, seed=seed)
         raw_items = _extract_raw_items(parsed3)
         debug_attempts.append(
             {"attempt": 3, "raw_content": raw_content3, "parsed": parsed3, "raw_items_count": len(raw_items)}
@@ -922,6 +986,42 @@ def write_metadata(path: Path, metadata: Dict[str, Any]) -> None:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
 
+def _package_version(name: str) -> Optional[str]:
+    """Return installed version for a package, or None if not available."""
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
+def _current_git_commit() -> Optional[str]:
+    """Return short git commit for the repo, or None if git is unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR),
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        return out.decode().strip() or None
+    except Exception:
+        return None
+
+
+def build_reproducibility_info() -> Dict[str, Any]:
+    """Collect runtime/version info for metadata reproducibility."""
+    return {
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": {
+            "ollama": _package_version("ollama"),
+            "pypdf": _package_version("pypdf"),
+            "pymupdf4llm": _package_version("pymupdf4llm"),
+        },
+        "git_commit": _current_git_commit(),
+    }
+
+
 # ----------------------------------------------------------------------
 # SECTION 9: ENTRY
 # ----------------------------------------------------------------------
@@ -969,6 +1069,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DEBUG_DIR,
         help="Folder to store raw model outputs by document/topic.",
     )
+    parser.add_argument(
+        "--only-doc",
+        type=str,
+        default=None,
+        help="Process only the PDF whose filename (or stem) matches this value.",
+    )
+    parser.add_argument(
+        "--skip-model-check",
+        action="store_true",
+        help="Skip verifying that the Ollama model is available before starting.",
+    )
     return parser
 
 
@@ -983,13 +1094,25 @@ def validate_args(args: argparse.Namespace) -> None:
         errors.append("--num-topics debe ser >= 1")
     if args.questions_per_topic < 1:
         errors.append("--questions-per-topic debe ser >= 1")
-    if not (0.0 < args.temperature <= 2.0):
-        errors.append(f"--temperature debe estar en (0.0, 2.0], recibido: {args.temperature}")
+    if not (0.0 <= args.temperature <= 2.0):
+        errors.append(f"--temperature debe estar en [0.0, 2.0], recibido: {args.temperature}")
 
     if errors:
         for err in errors:
             print(f"[ERROR] {err}")
         raise SystemExit(1)
+
+
+def filter_pdfs_by_only_doc(pdfs: Sequence[Path], only_doc: Optional[str]) -> List[Path]:
+    """Keep only the PDF matching `only_doc` (filename or stem, case-insensitive)."""
+    if not only_doc:
+        return list(pdfs)
+    target = only_doc.strip().lower()
+    matched = [p for p in pdfs if p.name.lower() == target or p.stem.lower() == target]
+    if not matched:
+        available = ", ".join(p.name for p in pdfs) or "(ninguno)"
+        raise RuntimeError(f"--only-doc='{only_doc}' no encontrado. Disponibles: {available}")
+    return matched
 
 
 def main() -> None:
@@ -1003,6 +1126,11 @@ def main() -> None:
     if not pdf_files:
         raise RuntimeError(f"No se encontraron PDFs en {args.source_dir}")
 
+    pdf_files = filter_pdfs_by_only_doc(pdf_files, args.only_doc)
+
+    if not args.skip_model_check:
+        verify_ollama_model(args.model)
+
     args.debug_dir.mkdir(parents=True, exist_ok=True)
 
     generated: List[Dict[str, Any]] = []
@@ -1014,8 +1142,10 @@ def main() -> None:
         raw_text = extract_text_from_pdf(pdf_path)
         full_context = truncate_text(raw_text, args.max_doc_context_chars)
 
-        chunks = build_chunks_from_pdfs(
-            pdf_paths=[pdf_path],
+        chunks = build_chunks_from_text(
+            raw_text=raw_text,
+            document_name=pdf_path.name,
+            document_stem=pdf_path.stem,
             chunk_size=args.chunk_size,
             chunk_overlap=args.chunk_overlap,
             max_chunks=args.max_chunks,
@@ -1035,6 +1165,7 @@ def main() -> None:
             model=args.model,
             messages=topic_messages,
             temperature=args.temperature,
+            seed=args.seed,
         )
         topics = parse_topics(topics_payload)
 
@@ -1097,6 +1228,7 @@ def main() -> None:
                 questions_per_topic=args.questions_per_topic,
                 temperature=args.temperature,
                 existing_questions=existing_questions,
+                seed=args.seed,
             )
             generated.extend(topic_items)
             existing_questions.extend(item["question"] for item in topic_items)
@@ -1124,6 +1256,7 @@ def main() -> None:
     write_jsonl(Path(f"{output_base}_val.jsonl"), val_rows)
     write_jsonl(Path(f"{output_base}_test.jsonl"), test_rows)
 
+    verified_count = sum(1 for item in deduped if item.get("context_source_verified"))
     metadata = {
         "created_at": now_iso(),
         "model": args.model,
@@ -1135,6 +1268,7 @@ def main() -> None:
         "topic_count": total_topics,
         "generated_items": len(generated),
         "deduplicated_items": len(deduped),
+        "context_source_verified_items": verified_count,
         "split": {"train": len(train_rows), "val": len(val_rows), "test": len(test_rows)},
         "params": {
             "chunk_size": args.chunk_size,
@@ -1145,7 +1279,9 @@ def main() -> None:
             "seed": args.seed,
             "max_doc_context_chars": args.max_doc_context_chars,
             "max_topic_context_chars": args.max_topic_context_chars,
+            "only_doc": args.only_doc,
         },
+        "runtime": build_reproducibility_info(),
     }
     write_metadata(args.output.with_suffix(".meta.json"), metadata)
 
