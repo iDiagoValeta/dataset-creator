@@ -94,6 +94,7 @@ Output:
 - `pipeline/output/dataset_val.jsonl`
 - `pipeline/output/dataset_test.jsonl`
 - `pipeline/output/dataset.meta.json`
+- `pipeline/output/dataset.rejected.jsonl` (items filtered out by the quality gate)
 - `pipeline/run_logs/<pdf>.json` (raw model outputs per document/topic)
 - `pipeline/run_logs/<pdf>.items.jsonl` (per-document checkpoint, used by `--resume`)
 
@@ -107,6 +108,7 @@ python pipeline/generate_dataset.py --language ca   # force Valencian / Catalan 
 python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/thesis_es.jsonl
 python pipeline/generate_dataset.py --only-doc Operating_system.pdf
 python pipeline/generate_dataset.py --only-doc a.pdf,b.pdf
+python pipeline/generate_dataset.py --quality-gate strict
 python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
 python pipeline/generate_dataset.py --resume
 python pipeline/generate_dataset.py --dry-run
@@ -119,6 +121,7 @@ Notable flags:
 - `--language auto`: detect the language per PDF and generate topics/questions/answers in that source language. This is the default.
 - `--language <code>`: force a language for all PDFs (`es`, `en`, `ca`, etc.).
 - `--only-doc <names>`: process only the matching PDFs (filename or stem, case-insensitive). Comma-separated for multiple (e.g. `a.pdf,b.pdf`).
+- `--quality-gate strict|balanced|off`: filter generated items before writing the final dataset. `strict` is the default and keeps only clean, context-verified items; rejected rows are written to `dataset.rejected.jsonl`.
 - `--skip-model-check`: skip the initial `ollama.list()` availability check.
 - `--resume`: skip documents that already have a non-empty checkpoint file in `--debug-dir` (`<stem>.items.jsonl`).
 - `--dry-run`: extract and chunk PDFs, print stats (chunks, estimated Ollama calls and items), and exit without calling the model. Useful for sizing a run.
@@ -157,6 +160,7 @@ Each JSONL line contains:
 - `topic_keywords`
 - `document`
 - `document_language`
+- `source_chunk_ids`
 - `created_at`
 - `context_excerpt`
 
@@ -164,7 +168,8 @@ Each JSONL line contains:
 
 `dataset.meta.json` includes:
 
-- Counts (`pdf_count`, `chunk_count`, `topic_count`, `generated_items`, `deduplicated_items`, `context_source_verified_items`, `resumed_documents`).
+- Counts (`pdf_count`, `chunk_count`, `topic_count`, `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, `context_source_verified_items`, `resumed_documents`).
+- `quality` with the active quality gate, accepted/rejected counts, verified ratio, and rejection reasons.
 - `document_languages` mapping each PDF filename to its detected or forced language.
 - `params` with every hyperparameter used (including `only_doc`, `resume`).
 - `runtime` with `python_version`, `platform`, installed versions of `ollama` / `pypdf` / `pymupdf4llm`, and `git_commit` (when executed inside a repo).
@@ -178,9 +183,11 @@ Each JSONL line contains:
 - Per-document language detection by default, with manual override through `--language`.
 - Chunk-based topic fallback when the model fails to return parseable topics.
 - Compact topic-map retry when the full-document topic map is not parseable.
-- Exact + semantic (bigram) deduplication to reduce repetition.
+- Section-heading topic refinement when the model returns overly generic topics.
+- Exact + semantic (bigram) deduplication to reduce repetition, including duplicate answers.
 - `type` and `difficulty` normalization against out-of-schema model outputs.
-- Substring verification of `context_source` (exposed as `context_source_verified`).
+- Context-source repair and substring verification of `context_source` (exposed as `context_source_verified`).
+- Strict quality gate that rejects unverified items and common PDF extraction artifacts from the final JSONL.
 
 ## Tests and lint
 

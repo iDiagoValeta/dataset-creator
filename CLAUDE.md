@@ -61,11 +61,12 @@ pyproject.toml
 2. Extract text (`pymupdf4llm` preferred, `pypdf` defensive fallback).
 3. Split text into overlapping chunks.
 4. Detect the document language unless `--language` forces a specific output language.
-5. Generate a topic map per document using wide context, with compact retry and chunk fallback.
+5. Generate a topic map per document using wide context, with compact retry, section-heading refinement for overly generic maps, and chunk fallback.
 6. Generate questions per topic without semantic repetition (`think=False`) in the document language.
-7. Deduplicate (exact + semantic via bigrams).
-8. Export the main JSONL and train/val/test splits.
-9. Persist metadata and per-document/topic run logs, plus per-document checkpoints for `--resume`.
+7. Apply the quality gate before deduplication. In `strict` mode, keep only clean items with verified source context and write rejected rows to `dataset.rejected.jsonl`.
+8. Deduplicate accepted items (exact + semantic via bigrams, including duplicate answers).
+9. Export the main JSONL and train/val/test splits.
+10. Persist metadata and per-document/topic run logs, plus per-document checkpoints for `--resume`.
 
 ## 6. Critical variables
 
@@ -83,17 +84,30 @@ pyproject.toml
 | `DATASET_QUESTIONS_PER_TOPIC` | `6` | QA items per topic |
 | `DATASET_MAX_DOC_CONTEXT_CHARS` | `110000` | Max context for topic mapping |
 | `DATASET_MAX_TOPIC_CONTEXT_CHARS` | `24000` | Max context for QA generation |
+| `DATASET_QUALITY_GATE` | `strict` | Final quality filter (`strict`, `balanced`, `off`) |
 
 ## 7. Current CLI notes
 
 - `--language auto` is the default and should generate topics, questions, and answers in the detected source-document language.
 - `--language <code>` forces one language for all PDFs.
+- `--quality-gate strict|balanced|off` controls final dataset filtering. Default `strict` rejects unverified items and common extraction artifacts; rejected rows are written to `dataset.rejected.jsonl`.
 - `--dry-run` extracts/chunks PDFs and reports detected language, estimated topics/items, and estimated Ollama calls without model generation.
 - `--clean-dry-run` lists generated JSON/JSONL artifacts that would be removed.
 - `--clean` removes generated `.json` and `.jsonl` files from `pipeline/output` and `pipeline/run_logs`, preserving `.gitkeep` and input PDFs.
 
 ## 8. Output schema and metadata notes
 
-Each item includes `document_language` in addition to the QA fields, topic fields, source document, timestamps, and context traceability.
+Each item includes `document_language` and `source_chunk_ids` in addition to the QA fields, topic fields, source document, timestamps, and context traceability.
 
 `dataset.meta.json` includes `document_languages`, a mapping from PDF filename to the detected or forced language, plus counts, params, split sizes, runtime info, and reproducibility metadata.
+
+Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons, accepted items before dedupe, verified items before dedupe, and duplicates removed after quality filtering.
+
+The standard output set includes:
+
+- `pipeline/output/dataset.jsonl`
+- `pipeline/output/dataset_train.jsonl`
+- `pipeline/output/dataset_val.jsonl`
+- `pipeline/output/dataset_test.jsonl`
+- `pipeline/output/dataset.meta.json`
+- `pipeline/output/dataset.rejected.jsonl`

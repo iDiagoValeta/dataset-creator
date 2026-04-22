@@ -45,6 +45,21 @@ def test_chunk_text_empty_input():
     assert gd.chunk_text("", chunk_size=200, chunk_overlap=50) == []
 
 
+def test_clean_markdown_artifacts_removes_picture_and_ref_noise():
+    text = "Virtual memory in the 80 computer. == picture 188 x 297 intentionally omitted <== OS/360 stayed."
+    cleaned = gd.clean_markdown_artifacts(text)
+    assert "picture" not in cleaned
+    assert "80 computer" not in cleaned
+    assert "OS/360" in cleaned
+
+
+def test_clean_generated_text_capitalizes_and_removes_numeric_artifact():
+    cleaned = gd.clean_generated_text("swapping helps the 80 computer avoid limits Ã¢â‚¬â€ safely.")
+    assert cleaned.startswith("Swapping")
+    assert "80 computer" not in cleaned
+    assert "Ã¢" not in cleaned
+
+
 # --- try_parse_json_payload -------------------------------------------
 
 def test_try_parse_json_payload_clean_object():
@@ -91,6 +106,47 @@ def test_parse_topics_empty_payload():
     assert gd.parse_topics({}) == []
 
 
+def test_section_topics_from_headings_skip_generic_reference_noise():
+    text = """
+Operating system
+Definition and purpose
+This paragraph explains what operating systems do.
+Components
+Kernel
+Program execution
+References
+List of operating systems
+Histor y
+"""
+    topics = gd.build_section_topics_from_text(text, num_topics=4)
+    assert [t.name for t in topics] == [
+        "Definition and purpose",
+        "Kernel",
+        "Program execution",
+    ]
+
+
+def test_build_topic_context_prefers_exact_section_chunk():
+    chunks = [
+        gd.Chunk("doc-chunk-0000", "doc.pdf", "Definition and purpose\nOperating systems manage hardware."),
+        gd.Chunk("doc-chunk-0001", "doc.pdf", "Types of operating systems\nEmbedded systems are common."),
+        gd.Chunk("doc-chunk-0002", "doc.pdf", "Kernel\nA kernel protects memory."),
+    ]
+    topic = gd.Topic("topic-00", "Types of operating systems", "s", ["operating", "systems"])
+    context = gd.build_topic_context(chunks, topic, max_topic_context_chars=10_000)
+    assert "doc-chunk-0001" in context
+    assert "doc-chunk-0000" not in context
+
+
+def test_topics_are_too_generic_detects_bad_llm_map():
+    topics = [
+        gd.Topic("topic-00", "Operating System Concepts", "s", []),
+        gd.Topic("topic-01", "Operating System References", "s", []),
+        gd.Topic("topic-02", "Kernel", "s", []),
+    ]
+    assert gd.topics_are_too_generic(topics) is True
+
+
 # --- language detection -----------------------------------------------
 
 def test_detect_document_language_identifies_english():
@@ -134,6 +190,14 @@ def test_deduplicate_items_drops_near_duplicates():
 def test_deduplicate_items_keeps_distinct_questions():
     items = [_item("What is memory paging?"), _item("How does disk scheduling work?")]
     assert len(gd.deduplicate_items(items)) == 2
+
+
+def test_deduplicate_items_drops_duplicate_answers():
+    items = [
+        {"question": "What is an OS?", "answer": "An OS manages hardware resources."},
+        {"question": "How can an operating system be described?", "answer": "An OS manages hardware resources."},
+    ]
+    assert len(gd.deduplicate_items(items)) == 1
 
 
 # --- filter_pdfs_by_only_doc ------------------------------------------
@@ -216,6 +280,21 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
     assert items[0]["context_source"] == "schedules processes"
     assert items[0]["document_language"] == "es"
     assert items[0]["difficulty"] == "hard"
+    assert items[0]["source_chunk_ids"] == []
+
+
+def test_find_verified_context_source_repairs_from_answer_overlap():
+    context = (
+        "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly. "
+        "File systems store persistent data."
+    )
+    source, verified = gd.find_verified_context_source(
+        "not a literal source",
+        "The kernel schedules processes and allocates memory fairly.",
+        context,
+    )
+    assert verified is True
+    assert source == "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly."
 
 
 def test_sample_existing_questions_respects_limit():
@@ -275,3 +354,20 @@ def test_context_source_falls_back_when_not_substring(monkeypatch):
     assert items[0]["type"] == "factual"          # bogus type normalized
     assert items[0]["difficulty"] == "medium"     # bogus difficulty normalized
     assert items[0]["context_source"].startswith("Pagination")
+
+
+def test_apply_quality_gate_strict_rejects_unverified_and_artifacts():
+    items = [
+        {"id": "ok", "context_source_verified": True, "answer": "Kernel allocates memory.", "topic": "Kernel"},
+        {"id": "bad-source", "context_source_verified": False, "answer": "Unsupported.", "topic": "Kernel"},
+        {
+            "id": "bad-artifact",
+            "context_source_verified": True,
+            "answer": "Virtual memory in the 80 computer.",
+            "topic": "Kernel",
+        },
+    ]
+    accepted, rejected, stats = gd.apply_quality_gate(items, "strict")
+    assert [item["id"] for item in accepted] == ["ok"]
+    assert {item["id"] for item in rejected} == {"bad-source", "bad-artifact"}
+    assert stats["verified_ratio"] == 1.0

@@ -96,10 +96,12 @@ DEFAULT_TEMPERATURE = float(os.getenv("DATASET_TEMPERATURE", "0.2"))
 DEFAULT_SEED = int(os.getenv("DATASET_SEED", "42"))
 DEFAULT_MAX_DOC_CONTEXT_CHARS = int(os.getenv("DATASET_MAX_DOC_CONTEXT_CHARS", "110000"))
 DEFAULT_MAX_TOPIC_CONTEXT_CHARS = int(os.getenv("DATASET_MAX_TOPIC_CONTEXT_CHARS", "24000"))
+DEFAULT_QUALITY_GATE = os.getenv("DATASET_QUALITY_GATE", "strict")
 DEFAULT_OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT_SECS", "300"))
 MIN_TOPIC_CONTEXT_CHARS = 9000
 VALID_TYPES = {"factual", "conceptual", "inference", "compare", "definition"}
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+VALID_QUALITY_GATES = {"strict", "balanced", "off"}
 DEFAULT_OLLAMA_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "3"))
 DEFAULT_OLLAMA_RETRY_BACKOFF = float(os.getenv("OLLAMA_RETRY_BACKOFF_SECS", "2.0"))
 STOPWORDS: frozenset = frozenset({
@@ -222,12 +224,31 @@ def strip_accents_ascii(text: str) -> str:
 def clean_markdown_artifacts(text: str) -> str:
     """Remove markdown/wiki artifacts that hurt topic and QA generation quality."""
     cleaned = text
+    cleaned = cleaned.replace("Ã¢â‚¬â€", " - ").replace("Ã¢â‚¬â€œ", " - ")
+    cleaned = cleaned.replace("Ã¢â‚¬Ëœ", "'").replace("Ã¢â‚¬â„¢", "'")
+    cleaned = cleaned.replace("Ã¢â‚¬Å“", '"').replace("Ã¢â‚¬Â", '"')
+    cleaned = re.sub(r"==\s*picture\s+\d+\s+x\s+\d+\s+intentionally omitted\s*<==", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r"\1", cleaned)
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
     cleaned = re.sub(r"\[\[\d+\]\]", " ", cleaned)
+    cleaned = re.sub(r"(?<![A-Za-z/])\b\d{1,3}\b(?![A-Za-z/])", " ", cleaned)
     cleaned = re.sub(r"[~`*_#>{}\[\]|]+", " ", cleaned)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return normalize_whitespace(cleaned)
+
+
+def clean_generated_text(text: str) -> str:
+    """Clean extraction artifacts that leaked into generated questions or answers."""
+    cleaned = text
+    cleaned = cleaned.replace("Ã¢â‚¬â€", " - ").replace("Ã¢â‚¬â€œ", " - ")
+    cleaned = cleaned.replace("Ã¢â‚¬Ëœ", "'").replace("Ã¢â‚¬â„¢", "'")
+    cleaned = cleaned.replace("Ã¢â‚¬Å“", '"').replace("Ã¢â‚¬Â", '"')
+    cleaned = re.sub(r"==\s*picture\s+\d+\s+x\s+\d+\s+intentionally omitted\s*<==", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"(?<![A-Za-z/])\b\d{2,3}\b(?![A-Za-z/])", " ", cleaned)
+    cleaned = normalize_whitespace(cleaned)
+    if cleaned:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
 
 
 def now_iso() -> str:
@@ -368,6 +389,80 @@ def build_chunks_from_text(
         if max_chunks is not None and len(chunks) >= max_chunks:
             break
     return chunks
+
+
+GENERIC_TOPIC_TERMS = {
+    "concept",
+    "concepts",
+    "theory",
+    "references",
+    "literature",
+    "history and literature",
+    "structure and concepts",
+}
+
+
+def extract_section_headings(text: str) -> list[str]:
+    """Extract short, useful section headings from PDF text."""
+    headings: list[str] = []
+    for raw_line in text.splitlines():
+        line = normalize_whitespace(raw_line)
+        line = line.replace("Histor y", "History")
+        if not (3 <= len(line) <= 80):
+            continue
+        if re.search(r"https?://|ISBN|\[\d+\]|\d{4}", line):
+            continue
+        words = line.split()
+        if len(words) > 8:
+            continue
+        letters = re.sub(r"[^A-Za-z ]", "", line)
+        if not letters.strip():
+            continue
+        if line.endswith(".") or line.endswith(","):
+            continue
+        lowercase_words = sum(
+            1
+            for word in words
+            if word[:1].islower() and word.lower() not in {"and", "or", "of", "in", "for", "to", "the"}
+        )
+        if lowercase_words > max(1, len(words) // 2):
+            continue
+        headings.append(line)
+    return deduplicate_preserve_order(headings)
+
+
+def build_section_topics_from_text(text: str, num_topics: int) -> list[Topic]:
+    """Build deterministic topics from document section headings."""
+    headings = extract_section_headings(text)
+    blocked = {"operating system", "components", "history", "popular operating systems", "references"}
+    preferred = [
+        heading for heading in headings
+        if heading.lower() not in blocked and not heading.lower().startswith("list of ")
+    ]
+    selected = preferred[:num_topics]
+    topics: list[Topic] = []
+    for idx, heading in enumerate(selected):
+        topics.append(
+            Topic(
+                topic_id=f"topic-{idx:02d}",
+                name=heading,
+                summary=f"Questions grounded in the '{heading}' section of the document.",
+                keywords=extract_keywords(heading),
+            )
+        )
+    return topics
+
+
+def topics_are_too_generic(topics: Sequence[Topic]) -> bool:
+    """Return True when the model topic map is mostly broad labels, not document sections."""
+    if not topics:
+        return True
+    generic = 0
+    for topic in topics:
+        name = topic.name.lower()
+        if any(term in name for term in GENERIC_TOPIC_TERMS):
+            generic += 1
+    return generic >= max(2, len(topics) // 2)
 
 
 # ----------------------------------------------------------------------
@@ -931,6 +1026,24 @@ def build_topic_context(
     max_topic_context_chars: int,
 ) -> str:
     """Select and concatenate best chunks for a given topic."""
+    topic_name = topic.name.strip().lower()
+    if topic_name:
+        for index, chunk in enumerate(chunks):
+            if topic_name in chunk.text.lower():
+                selected_blocks: list[str] = []
+                total = 0
+                for section_chunk in chunks[index : min(len(chunks), index + 2)]:
+                    block = f"[{section_chunk.chunk_id}] {section_chunk.text}"
+                    if total + len(block) > max_topic_context_chars:
+                        remaining = max_topic_context_chars - total
+                        if remaining >= 500:
+                            selected_blocks.append(truncate_text(block, remaining))
+                        break
+                    selected_blocks.append(block)
+                    total += len(block)
+                if selected_blocks:
+                    return "\n\n".join(selected_blocks)
+
     scored = [(score_chunk_for_topic(chunk, topic), chunk) for chunk in chunks]
     scored.sort(key=lambda item: item[0], reverse=True)
 
@@ -950,6 +1063,74 @@ def build_topic_context(
             break
 
     return "\n\n".join(selected)
+
+
+def _content_words(text: str) -> list[str]:
+    """Return normalized content words for lightweight support checks."""
+    return [
+        word
+        for word in re.findall(r"[A-Za-zÀ-ÿ]{4,}", strip_accents_ascii(text))
+        if word not in STOPWORDS
+    ]
+
+
+def find_verified_context_source(raw_source: str, answer: str, topic_context: str) -> tuple[str, bool]:
+    """Find a literal context fragment that supports an answer."""
+    normalized_context = normalize_whitespace(topic_context)
+    source = normalize_whitespace(raw_source)[:300]
+    if source and source.lower() in normalized_context.lower():
+        start = normalized_context.lower().find(source.lower())
+        return normalized_context[start : start + len(source)], True
+
+    answer_words = _content_words(answer)
+    if len(answer_words) < 3:
+        return "", False
+    answer_terms = set(answer_words)
+    best_sentence = ""
+    best_score = 0.0
+    for sentence in re.split(r"(?<=[.!?])\s+", normalized_context):
+        clean_sentence = sentence.strip()
+        if not (40 <= len(clean_sentence) <= 450):
+            continue
+        sentence_terms = set(_content_words(clean_sentence))
+        if not sentence_terms:
+            continue
+        score = len(answer_terms & sentence_terms) / max(1, len(answer_terms))
+        if score > best_score:
+            best_sentence = clean_sentence
+            best_score = score
+
+    if best_sentence and best_score >= 0.6:
+        return best_sentence[:300], True
+    return "", False
+
+
+def source_chunk_ids_for_fragment(topic_context: str, fragment: str) -> list[str]:
+    """Infer chunk ids that contain or precede a source fragment."""
+    chunk_ids = re.findall(r"\[([^\]]+-chunk-\d{4})\]", topic_context)
+    if not fragment:
+        return chunk_ids[:1]
+    fragment_pos = topic_context.lower().find(fragment.lower()[:80])
+    if fragment_pos < 0:
+        return chunk_ids[:1]
+    prefix = topic_context[:fragment_pos]
+    preceding = re.findall(r"\[([^\]]+-chunk-\d{4})\]", prefix)
+    return preceding[-1:] if preceding else chunk_ids[:1]
+
+
+def has_quality_artifact(item: dict[str, Any]) -> bool:
+    """Detect extraction artifacts that should not reach strict output."""
+    text = " ".join(
+        str(item.get(key, ""))
+        for key in ("question", "answer", "context_source", "context_excerpt", "topic")
+    ).lower()
+    if "intentionally omitted" in text or "== picture" in text:
+        return True
+    if re.search(r"\b\d{2,3}\s+(computer|medical|process|memory|device|system)\b", text):
+        return True
+    if str(item.get("topic", "")).strip().lower().endswith("references"):
+        return True
+    return False
 
 
 def generate_items_for_topic(
@@ -980,12 +1161,11 @@ def generate_items_for_topic(
 
     def _normalize_items(raw_items_local: list[Any]) -> list[dict[str, Any]]:
         normalized_local: list[dict[str, Any]] = []
-        topic_context_lower = topic_context.lower()
         for idx, item in enumerate(raw_items_local[:questions_per_topic]):
             if not isinstance(item, dict):
                 continue
-            question = str(item.get("question", "")).strip()
-            answer = str(item.get("answer", "")).strip()
+            question = clean_generated_text(str(item.get("question", "")).strip())
+            answer = clean_generated_text(str(item.get("answer", "")).strip())
             if not question or not answer:
                 continue
             raw_type = str(item.get("type", "factual")).strip().lower()
@@ -993,9 +1173,10 @@ def generate_items_for_topic(
             raw_difficulty = str(item.get("difficulty", "medium")).strip().lower()
             difficulty = raw_difficulty if raw_difficulty in VALID_DIFFICULTIES else "medium"
 
-            raw_source = str(item.get("context_source", "")).strip()[:300]
-            context_verified = bool(raw_source) and raw_source.lower() in topic_context_lower
-            context_source = raw_source if context_verified else topic_context[:300]
+            raw_source = clean_generated_text(str(item.get("context_source", "")).strip())[:300]
+            context_source, context_verified = find_verified_context_source(raw_source, answer, topic_context)
+            if not context_source:
+                context_source = normalize_whitespace(topic_context[:300])
 
             normalized_local.append(
                 {
@@ -1011,8 +1192,9 @@ def generate_items_for_topic(
                     "topic_keywords": topic.keywords,
                     "document": document,
                     "document_language": item_document_language,
+                    "source_chunk_ids": source_chunk_ids_for_fragment(topic_context, context_source),
                     "created_at": now_iso(),
-                    "context_excerpt": topic_context[:500],
+                    "context_excerpt": normalize_whitespace(topic_context[:500]),
                 }
             )
         return normalized_local
@@ -1092,15 +1274,21 @@ def _question_bigrams(text: str) -> frozenset:
     return frozenset(words)
 
 
-def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float = 0.6) -> list[dict[str, Any]]:
+def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float = 0.85) -> list[dict[str, Any]]:
     """Drop exact and near-semantic duplicated questions."""
     seen_exact = set()
+    seen_answers = set()
     seen_bigrams: list[frozenset] = []
     unique: list[dict[str, Any]] = []
     for item in items:
         question = str(item.get("question", ""))
         signature = sanitize_question(question)
-        if not signature or signature in seen_exact:
+        answer_signature = sanitize_question(str(item.get("answer", "")))
+        if (
+            not signature
+            or signature in seen_exact
+            or (len(answer_signature) >= 12 and answer_signature in seen_answers)
+        ):
             continue
 
         q_bigrams = _question_bigrams(question)
@@ -1117,9 +1305,49 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
             continue
 
         seen_exact.add(signature)
+        if answer_signature:
+            seen_answers.add(answer_signature)
         seen_bigrams.append(q_bigrams)
         unique.append(item)
     return unique
+
+
+def apply_quality_gate(
+    items: Sequence[dict[str, Any]],
+    gate: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Filter generated items and return accepted rows, rejected rows, and quality stats."""
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    reason_counts: dict[str, int] = {}
+
+    def reject(item: dict[str, Any], reason: str) -> None:
+        row = dict(item)
+        row["rejection_reason"] = reason
+        rejected.append(row)
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+    for item in items:
+        if gate == "off":
+            accepted.append(item)
+            continue
+        if has_quality_artifact(item):
+            reject(item, "artifact_or_reference_noise")
+            continue
+        if gate == "strict" and not item.get("context_source_verified"):
+            reject(item, "unverified_context_source")
+            continue
+        accepted.append(item)
+
+    verified = sum(1 for item in accepted if item.get("context_source_verified"))
+    return accepted, rejected, {
+        "gate": gate,
+        "accepted_items": len(accepted),
+        "rejected_items": len(rejected),
+        "verified_items": verified,
+        "verified_ratio": round(verified / len(accepted), 4) if accepted else 0.0,
+        "rejection_reasons": reason_counts,
+    }
 
 
 # ----------------------------------------------------------------------
@@ -1308,6 +1536,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Folder to store raw model outputs by document/topic.",
     )
     parser.add_argument(
+        "--quality-gate",
+        choices=sorted(VALID_QUALITY_GATES),
+        default=DEFAULT_QUALITY_GATE,
+        help="Quality filtering before writing final JSONL. Default: strict.",
+    )
+    parser.add_argument(
         "--only-doc",
         type=str,
         default=None,
@@ -1355,6 +1589,10 @@ def validate_args(args: argparse.Namespace) -> None:
         errors.append("--questions-per-topic debe ser >= 1")
     if not (0.0 <= args.temperature <= 2.0):
         errors.append(f"--temperature debe estar en [0.0, 2.0], recibido: {args.temperature}")
+    if args.quality_gate not in VALID_QUALITY_GATES:
+        errors.append(
+            f"--quality-gate debe ser uno de {sorted(VALID_QUALITY_GATES)}, recibido: {args.quality_gate}"
+        )
 
     if errors:
         for err in errors:
@@ -1615,6 +1853,22 @@ def main() -> None:
                 f"  - Aviso: el modelo no devolvio topicos parseables para {pdf_path.name}; "
                 f"usando fallback ({len(topics)} topicos)."
             )
+        elif topics_are_too_generic(topics):
+            section_topics = build_section_topics_from_text(raw_text, args.num_topics)
+            if section_topics:
+                doc_debug["llm_topics_replaced"] = [
+                    {"name": t.name, "summary": t.summary, "keywords": t.keywords}
+                    for t in topics
+                ]
+                topics = section_topics
+                doc_debug["topic_map_strategy"] = f"{doc_debug['topic_map_strategy']}_section_refined"
+                doc_debug["topic_map_payload"] = {
+                    "topics": [
+                        {"name": t.name, "summary": t.summary, "keywords": t.keywords}
+                        for t in topics
+                    ]
+                }
+                print("  - Aviso: topicos LLM demasiado genericos; usando secciones detectadas.")
 
         if not topics:
             print(f"  - Saltado: no se pudieron construir topicos para {pdf_path.name}")
@@ -1634,7 +1888,11 @@ def main() -> None:
             if not topic_context.strip():
                 print(" -> 0 items (sin contexto)")
                 continue
-            if len(topic_context) < MIN_TOPIC_CONTEXT_CHARS and len(full_context) > len(topic_context):
+            if (
+                args.quality_gate != "strict"
+                and len(topic_context) < MIN_TOPIC_CONTEXT_CHARS
+                and len(full_context) > len(topic_context)
+            ):
                 topic_context = truncate_text(full_context, min(args.max_topic_context_chars, len(full_context)))
 
             topic_t0 = time.time()
@@ -1670,7 +1928,13 @@ def main() -> None:
         write_metadata(debug_path, doc_debug)
         save_checkpoint_items(args.debug_dir, pdf_path, doc_items)
 
-    deduped = deduplicate_items(generated)
+    quality_candidates, rejected_rows, quality_stats = apply_quality_gate(generated, args.quality_gate)
+    deduped = deduplicate_items(quality_candidates)
+    quality_stats["accepted_items_before_dedup"] = len(quality_candidates)
+    quality_stats["verified_items_before_dedup"] = quality_stats["verified_items"]
+    quality_stats["duplicate_items_removed_after_quality"] = len(quality_candidates) - len(deduped)
+    quality_stats["accepted_items"] = len(deduped)
+    quality_stats["verified_items"] = sum(1 for item in deduped if item.get("context_source_verified"))
     train_rows, val_rows, test_rows = split_rows(deduped, split=split, seed=args.seed)
 
     write_jsonl(args.output, deduped)
@@ -1678,6 +1942,7 @@ def main() -> None:
     write_jsonl(Path(f"{output_base}_train.jsonl"), train_rows)
     write_jsonl(Path(f"{output_base}_val.jsonl"), val_rows)
     write_jsonl(Path(f"{output_base}_test.jsonl"), test_rows)
+    write_jsonl(Path(f"{output_base}.rejected.jsonl"), rejected_rows)
 
     verified_count = sum(1 for item in deduped if item.get("context_source_verified"))
     metadata = {
@@ -1692,7 +1957,10 @@ def main() -> None:
         "topic_count": total_topics,
         "generated_items": len(generated),
         "deduplicated_items": len(deduped),
+        "accepted_items": len(deduped),
+        "rejected_items": len(rejected_rows),
         "context_source_verified_items": verified_count,
+        "quality": quality_stats,
         "resumed_documents": resumed_docs,
         "split": {"train": len(train_rows), "val": len(val_rows), "test": len(test_rows)},
         "params": {
@@ -1704,6 +1972,7 @@ def main() -> None:
             "seed": args.seed,
             "max_doc_context_chars": args.max_doc_context_chars,
             "max_topic_context_chars": args.max_topic_context_chars,
+            "quality_gate": args.quality_gate,
             "only_doc": args.only_doc,
             "resume": args.resume,
         },
@@ -1717,11 +1986,13 @@ def main() -> None:
         print("  - Logs en run_logs/ por cada PDF (topic_map_strategy, attempts).")
         print("  - Que el modelo Ollama devuelve JSON valido para este idioma.")
         print("  - Que los PDFs contienen texto extraible (no solo imagenes).")
-        print(f"  - Items generados pre-dedup: {len(generated)} | post-dedup: 0")
+        print(f"  - Items generados: {len(generated)} | aceptados pre-dedup: {len(quality_candidates)}")
     else:
         print("Dataset generado correctamente.")
     print(f"- Total items: {len(deduped)}")
+    print(f"- Items rechazados por quality gate: {len(rejected_rows)}")
     print(f"- Archivo principal: {args.output}")
+    print(f"- Rechazados: {Path(f'{output_base}.rejected.jsonl')}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
     print(f"- context_source verificado (substring literal): {verified_count}/{len(deduped)}")
     if args.resume:
