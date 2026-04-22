@@ -498,6 +498,27 @@ def try_parse_json_payload(payload: str) -> dict[str, Any]:
 # SECTION 7: OLLAMA GENERATION PIPELINE
 # ----------------------------------------------------------------------
 
+def _ollama_list_models_entries(listing: Any) -> list[Any]:
+    """Normalize Client.list(): dict JSON vs ollama>=0.4 ListResponse with .models."""
+    if isinstance(listing, dict):
+        raw = listing.get("models", [])
+        return list(raw) if isinstance(raw, (list, tuple)) else []
+    models = getattr(listing, "models", None)
+    if isinstance(models, (list, tuple)):
+        return list(models)
+    return []
+
+
+def _ollama_entry_model_name(entry: Any) -> str | None:
+    if isinstance(entry, dict):
+        name = entry.get("model") or entry.get("name")
+    else:
+        name = getattr(entry, "model", None) or getattr(entry, "name", None)
+    if name is None:
+        return None
+    return str(name)
+
+
 def verify_ollama_model(model: str) -> None:
     """Abort early if Ollama is unreachable or the requested model is missing."""
     try:
@@ -508,10 +529,10 @@ def verify_ollama_model(model: str) -> None:
             f"No se pudo conectar con Ollama. ¿Está el servicio corriendo? Detalle: {exc}"
         ) from exc
 
-    models_payload = listing.get("models", []) if isinstance(listing, dict) else []
-    available = set()
+    models_payload = _ollama_list_models_entries(listing)
+    available: set[str] = set()
     for entry in models_payload:
-        name = entry.get("model") or entry.get("name") if isinstance(entry, dict) else None
+        name = _ollama_entry_model_name(entry)
         if name:
             available.add(name)
             available.add(name.split(":", 1)[0])
