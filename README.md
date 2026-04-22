@@ -32,9 +32,13 @@ dataset-creator/
 ## Instalacion
 
 ```bash
+# Opcion 1: requirements
 pip install -r pipeline/requirements.txt
-# Para desarrollar y lanzar tests
-pip install -r pipeline/requirements-dev.txt
+pip install -r pipeline/requirements-dev.txt   # incluye pytest
+
+# Opcion 2: pyproject
+pip install -e .
+pip install -e ".[dev]"                         # incluye pytest
 ```
 
 Copia `.env.example` a `.env` (o exporta variables en tu shell) y ajusta lo que necesites.
@@ -89,6 +93,17 @@ Flags nuevos:
 
 - `--only-doc <nombre>`: procesa un único PDF (por nombre o stem, case-insensitive).
 - `--skip-model-check`: omite la verificacion inicial `ollama.list()`.
+- `--resume`: salta documentos que ya tienen checkpoint no-vacio en `--debug-dir` (`<stem>.items.jsonl`).
+
+## Checkpointing
+
+Cada documento genera `pipeline/run_logs/<stem>.items.jsonl` con sus items. Si un run se interrumpe, reanudalo con:
+
+```bash
+python pipeline/generate_dataset.py --resume
+```
+
+Los documentos con checkpoint se cargan desde disco sin volver a llamar al modelo; los pendientes se procesan normalmente.
 
 ## Formato de cada item
 

@@ -102,44 +102,17 @@ VALID_TYPES = {"factual", "conceptual", "inference", "compare", "definition"}
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 DEFAULT_OLLAMA_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "3"))
 DEFAULT_OLLAMA_RETRY_BACKOFF = float(os.getenv("OLLAMA_RETRY_BACKOFF_SECS", "2.0"))
-_STOPWORDS_SET = {
-    "cual",
-    "como",
-    "para",
-    "este",
-    "esta",
-    "estos",
-    "estas",
-    "sobre",
-    "desde",
-    "hasta",
-    "entre",
-    "donde",
-    "cuando",
-    "que",
-    "del",
-    "las",
-    "los",
-    "una",
-    "uno",
-    "unos",
-    "unas",
-    "con",
-    "sin",
-    "por",
-    "what",
-    "which",
-    "how",
-    "does",
-    "that",
-    "with",
-    "from",
-    "have",
-    "has",
-    "this",
-    "these",
-    "those",
-}
+STOPWORDS: frozenset = frozenset({
+    # ES
+    "cual", "como", "para", "este", "esta", "estos", "estas", "sobre",
+    "desde", "hasta", "entre", "donde", "cuando", "que", "del", "las",
+    "los", "una", "uno", "unos", "unas", "con", "sin", "por",
+    # EN
+    "what", "which", "how", "does", "that", "with", "from", "have", "has",
+    "this", "these", "those", "the", "and", "for",
+})
+# Back-compat alias (kept for any external importers).
+_STOPWORDS_SET = STOPWORDS
 
 logging.basicConfig(
     level=logging.getLevelName(os.getenv("DATASET_LOG_LEVEL", "INFO")),
@@ -223,6 +196,21 @@ def clean_markdown_artifacts(text: str) -> str:
 def now_iso() -> str:
     """Return UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sample_existing_questions(existing: Sequence[str], limit: int) -> List[str]:
+    """Blend last-N with a deterministic sample of older questions to avoid recency bias."""
+    if len(existing) <= limit:
+        return list(existing)
+    recent_share = max(1, limit // 2)
+    recent = list(existing[-recent_share:])
+    older_pool = list(existing[:-recent_share])
+    older_budget = limit - len(recent)
+    if older_budget <= 0 or not older_pool:
+        return recent
+    rng = random.Random(len(existing))  # deterministic per call-site growth
+    older = rng.sample(older_pool, min(older_budget, len(older_pool)))
+    return older + recent
 
 
 def deduplicate_preserve_order(values: Sequence[str]) -> List[str]:
@@ -379,7 +367,8 @@ def build_topic_generation_messages(
     )
 
     max_existing_in_prompt = max(80, questions_per_topic * 10)
-    existing_block = "\n".join(f"- {q}" for q in existing_questions[-max_existing_in_prompt:])
+    sampled_existing = _sample_existing_questions(existing_questions, max_existing_in_prompt)
+    existing_block = "\n".join(f"- {q}" for q in sampled_existing)
     user_prompt = f"""
 Generate exactly {questions_per_topic} Q/A items for the topic below.
 Language for question and answer: {language}.
@@ -661,44 +650,10 @@ def parse_topics(payload: Dict[str, Any]) -> List[Topic]:
 
 def extract_keywords(text: str, max_keywords: int = 8) -> List[str]:
     """Extract naive keywords from a text snippet without external deps."""
-    stopwords = {
-        "que",
-        "para",
-        "como",
-        "este",
-        "esta",
-        "estos",
-        "estas",
-        "sobre",
-        "desde",
-        "hasta",
-        "entre",
-        "donde",
-        "cuando",
-        "cual",
-        "del",
-        "las",
-        "los",
-        "una",
-        "uno",
-        "unos",
-        "unas",
-        "con",
-        "sin",
-        "por",
-        "the",
-        "and",
-        "for",
-        "that",
-        "from",
-        "with",
-        "this",
-        "these",
-    }
     words = re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9_-]{3,}", text.lower())
     counts: Dict[str, int] = {}
     for w in words:
-        if w in stopwords:
+        if w in STOPWORDS:
             continue
         counts[w] = counts.get(w, 0) + 1
     ordered = sorted(counts.items(), key=lambda item: item[1], reverse=True)
@@ -910,7 +865,7 @@ def _question_bigrams(text: str) -> frozenset:
     words = [
         w
         for w in re.findall(r"[A-Za-zÀ-ÿ]{4,}", text.lower())
-        if w not in _STOPWORDS_SET
+        if w not in STOPWORDS
     ]
     if len(words) >= 2:
         return frozenset(zip(words, words[1:]))
@@ -1080,6 +1035,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip verifying that the Ollama model is available before starting.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip documents that already have a non-empty checkpoint file in --debug-dir.",
+    )
     return parser
 
 
@@ -1101,6 +1061,35 @@ def validate_args(args: argparse.Namespace) -> None:
         for err in errors:
             print(f"[ERROR] {err}")
         raise SystemExit(1)
+
+
+def _checkpoint_path(debug_dir: Path, pdf_path: Path) -> Path:
+    """Return the per-document checkpoint JSONL path."""
+    return debug_dir / f"{pdf_path.stem}.items.jsonl"
+
+
+def load_checkpoint_items(debug_dir: Path, pdf_path: Path) -> List[Dict[str, Any]]:
+    """Load previously generated items for a document, or empty list if absent."""
+    path = _checkpoint_path(debug_dir, pdf_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    items: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning("Checkpoint con linea corrupta en %s", path)
+    return items
+
+
+def save_checkpoint_items(debug_dir: Path, pdf_path: Path, items: Sequence[Dict[str, Any]]) -> None:
+    """Persist the items generated for a document (idempotent overwrite)."""
+    path = _checkpoint_path(debug_dir, pdf_path)
+    write_jsonl(path, list(items))
 
 
 def filter_pdfs_by_only_doc(pdfs: Sequence[Path], only_doc: Optional[str]) -> List[Path]:
@@ -1136,9 +1125,20 @@ def main() -> None:
     generated: List[Dict[str, Any]] = []
     total_chunks = 0
     total_topics = 0
+    resumed_docs = 0
 
     for pdf_index, pdf_path in enumerate(pdf_files, start=1):
         print(f"[{pdf_index}/{len(pdf_files)}] Procesando documento: {pdf_path.name}")
+
+        if args.resume:
+            cached = load_checkpoint_items(args.debug_dir, pdf_path)
+            if cached:
+                generated.extend(cached)
+                resumed_docs += 1
+                print(f"  - Resume: {len(cached)} items cargados desde checkpoint; salto generacion.")
+                continue
+
+        doc_items: List[Dict[str, Any]] = []
         raw_text = extract_text_from_pdf(pdf_path)
         full_context = truncate_text(raw_text, args.max_doc_context_chars)
 
@@ -1231,6 +1231,7 @@ def main() -> None:
                 seed=args.seed,
             )
             generated.extend(topic_items)
+            doc_items.extend(topic_items)
             existing_questions.extend(item["question"] for item in topic_items)
             print(f" -> {len(topic_items)} items")
             doc_debug["topics"].append(
@@ -1246,6 +1247,7 @@ def main() -> None:
 
         debug_path = args.debug_dir / f"{pdf_path.stem}.json"
         write_metadata(debug_path, doc_debug)
+        save_checkpoint_items(args.debug_dir, pdf_path, doc_items)
 
     deduped = deduplicate_items(generated)
     train_rows, val_rows, test_rows = split_rows(deduped, split=split, seed=args.seed)
@@ -1269,6 +1271,7 @@ def main() -> None:
         "generated_items": len(generated),
         "deduplicated_items": len(deduped),
         "context_source_verified_items": verified_count,
+        "resumed_documents": resumed_docs,
         "split": {"train": len(train_rows), "val": len(val_rows), "test": len(test_rows)},
         "params": {
             "chunk_size": args.chunk_size,
@@ -1280,16 +1283,27 @@ def main() -> None:
             "max_doc_context_chars": args.max_doc_context_chars,
             "max_topic_context_chars": args.max_topic_context_chars,
             "only_doc": args.only_doc,
+            "resume": args.resume,
         },
         "runtime": build_reproducibility_info(),
     }
     write_metadata(args.output.with_suffix(".meta.json"), metadata)
 
     print("")
-    print("Dataset generado correctamente.")
+    if not deduped:
+        print("[AVISO] El dataset final quedo vacio. Revisar:")
+        print("  - Logs en run_logs/ por cada PDF (topic_map_strategy, attempts).")
+        print("  - Que el modelo Ollama devuelve JSON valido para este idioma.")
+        print("  - Que los PDFs contienen texto extraible (no solo imagenes).")
+        print(f"  - Items generados pre-dedup: {len(generated)} | post-dedup: 0")
+    else:
+        print("Dataset generado correctamente.")
     print(f"- Total items: {len(deduped)}")
     print(f"- Archivo principal: {args.output}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
+    print(f"- context_source verificado (substring literal): {verified_count}/{len(deduped)}")
+    if args.resume:
+        print(f"- Documentos reanudados desde checkpoint: {resumed_docs}")
     print(f"- Metadata: {args.output.with_suffix('.meta.json')}")
     print(f"- Tiempo total: {time.time() - start_time:.1f}s")
 

@@ -177,6 +177,28 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
     assert items[0]["difficulty"] == "hard"
 
 
+def test_sample_existing_questions_respects_limit():
+    qs = [f"q{i}" for i in range(100)]
+    sampled = gd._sample_existing_questions(qs, limit=20)
+    assert len(sampled) == 20
+    # Recent half must be present in order at the tail.
+    assert sampled[-10:] == qs[-10:]
+
+
+def test_sample_existing_questions_no_sampling_when_under_limit():
+    qs = ["a", "b", "c"]
+    assert gd._sample_existing_questions(qs, limit=10) == qs
+
+
+def test_checkpoint_roundtrip(tmp_path: Path):
+    pdf = tmp_path / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    items = [{"id": "x-00", "question": "q", "answer": "a"}]
+    assert gd.load_checkpoint_items(tmp_path, pdf) == []
+    gd.save_checkpoint_items(tmp_path, pdf, items)
+    assert gd.load_checkpoint_items(tmp_path, pdf) == items
+
+
 def test_context_source_falls_back_when_not_substring(monkeypatch):
     topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=[])
     context = "Pagination avoids fragmentation."
