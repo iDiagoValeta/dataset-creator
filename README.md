@@ -1,121 +1,139 @@
 # dataset-creator
 
-Repositorio para generar datasets de preguntas/respuestas a partir de PDFs usando Ollama en local.
+Generate supervised QA datasets from PDFs using local Ollama models.
 
-## Objetivo
+## Why this repo exists
 
-Dado un PDF en `pipeline/input/`, el pipeline genera un JSONL estructurado con preguntas deducibles del texto, respuestas argumentables y trazabilidad de contexto.
+> Still a work in progress.
 
-## Estructura
+I needed high-quality QA datasets in **Spanish (Castilian)** and **Valencian** for my own projects, and the pipelines I had available didn't cover those languages well. Until now, I was building those datasets **manually with NotebookLM** — slow, non-reproducible, and hard to iterate on.
+
+This repository automates that workflow end-to-end: extract text from PDFs, map topics, generate grounded QA pairs with a local Ollama model, deduplicate, and export ready-to-train JSONL splits — all while keeping traceability back to the source context.
+
+It is a personal tool first, so expect ongoing changes.
+
+## Goal
+
+Given one or more PDFs in `pipeline/input/`, the pipeline produces a structured JSONL with questions answerable from the text, argumentable answers, and per-item context traceability.
+
+## Structure
 
 ```text
 dataset-creator/
 ├── CLAUDE.md
 ├── README.md
-└── pipeline/
-    ├── generate_dataset.py
-    ├── requirements.txt
-    ├── input/
-    │   └── .gitkeep
-    ├── output/
-    │   └── .gitkeep
-    └── run_logs/
-        └── .gitkeep
+├── pyproject.toml
+├── .env.example
+├── pipeline/
+│   ├── generate_dataset.py
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   ├── input/
+│   │   └── .gitkeep
+│   ├── output/
+│   │   └── .gitkeep
+│   └── run_logs/
+│       └── .gitkeep
+└── tests/
+    └── test_generate_dataset.py
 ```
 
-## Requisitos
+## Requirements
 
 - Python 3.10+
-- Ollama levantado localmente
-- Modelo descargado en Ollama (default recomendado: `gemma4:e2b`)
+- Ollama running locally
+- A model pulled in Ollama (recommended default: `gemma4:e2b`)
 
-## Instalacion
+## Installation
 
 ```bash
-# Opcion 1: requirements
+# Option 1: requirements files
 pip install -r pipeline/requirements.txt
-pip install -r pipeline/requirements-dev.txt   # incluye pytest
+pip install -r pipeline/requirements-dev.txt   # adds pytest
 
-# Opcion 2: pyproject
+# Option 2: pyproject
 pip install -e .
-pip install -e ".[dev]"                         # incluye pytest
+pip install -e ".[dev]"                         # adds pytest
 ```
 
-Copia `.env.example` a `.env` (o exporta variables en tu shell) y ajusta lo que necesites.
+Copy `.env.example` to `.env` (or export the variables in your shell) and tweak as needed.
 
-## Variables de entorno
+## Environment variables
 
 - `OLLAMA_DATASET_MODEL` (fallback: `OLLAMA_RAG_MODEL`, default `gemma4:e2b`)
 - `OLLAMA_TIMEOUT_SECS` (default `300`)
-- `OLLAMA_MAX_RETRIES` (default `3`) -- reintentos ante errores transitorios
-- `OLLAMA_RETRY_BACKOFF_SECS` (default `2.0`) -- backoff lineal entre reintentos
-- `DATASET_LANGUAGE` (default `es`)
+- `OLLAMA_MAX_RETRIES` (default `3`) — retries on transient Ollama errors
+- `OLLAMA_RETRY_BACKOFF_SECS` (default `2.0`) — linear backoff between retries
+- `DATASET_LANGUAGE` (default `es`; tested with `es`, `ca` / Valencian, and `en`)
 - `DATASET_CHUNK_SIZE` (default `3500`)
 - `DATASET_CHUNK_OVERLAP` (default `350`)
 - `DATASET_NUM_TOPICS` (default `8`)
 - `DATASET_QUESTIONS_PER_TOPIC` (default `6`)
 - `DATASET_SPLIT` (default `0.8,0.1,0.1`)
-- `DATASET_TEMPERATURE` (default `0.2`, acepta `0.0` para decoding greedy)
-- `DATASET_SEED` (default `42`, propagado a Ollama para determinismo)
+- `DATASET_TEMPERATURE` (default `0.2`; `0.0` allowed for greedy decoding)
+- `DATASET_SEED` (default `42`; forwarded to Ollama for determinism)
 - `DATASET_MAX_DOC_CONTEXT_CHARS` (default `110000`)
 - `DATASET_MAX_TOPIC_CONTEXT_CHARS` (default `24000`)
 - `DATASET_LOG_LEVEL` (default `INFO`)
 
-## Uso rapido
+## Quick usage
 
-1. Coloca PDFs en `pipeline/input/`.
-2. Ejecuta:
+1. Drop PDFs into `pipeline/input/`.
+2. Run:
 
 ```bash
 python pipeline/generate_dataset.py
 ```
 
-Salida:
+Output:
 
 - `pipeline/output/dataset.jsonl`
 - `pipeline/output/dataset_train.jsonl`
 - `pipeline/output/dataset_val.jsonl`
 - `pipeline/output/dataset_test.jsonl`
 - `pipeline/output/dataset.meta.json`
-- `pipeline/run_logs/<pdf>.json`
+- `pipeline/run_logs/<pdf>.json` (raw model outputs per document/topic)
+- `pipeline/run_logs/<pdf>.items.jsonl` (per-document checkpoint, used by `--resume`)
 
-## Ejemplos CLI
+## CLI examples
 
 ```bash
 python pipeline/generate_dataset.py --model gemma4:e2b --num-topics 10 --questions-per-topic 8
-python pipeline/generate_dataset.py --language en --split 0.7,0.15,0.15
-python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/tesis_es.jsonl
+python pipeline/generate_dataset.py --language es --split 0.7,0.15,0.15
+python pipeline/generate_dataset.py --language ca   # Valencian / Catalan output
+python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/thesis_es.jsonl
 python pipeline/generate_dataset.py --only-doc Operating_system.pdf
 python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
+python pipeline/generate_dataset.py --resume
 ```
 
-Flags nuevos:
+Notable flags:
 
-- `--only-doc <nombre>`: procesa un único PDF (por nombre o stem, case-insensitive).
-- `--skip-model-check`: omite la verificacion inicial `ollama.list()`.
-- `--resume`: salta documentos que ya tienen checkpoint no-vacio en `--debug-dir` (`<stem>.items.jsonl`).
+- `--only-doc <name>`: process a single PDF (matched by filename or stem, case-insensitive).
+- `--skip-model-check`: skip the initial `ollama.list()` availability check.
+- `--resume`: skip documents that already have a non-empty checkpoint file in `--debug-dir` (`<stem>.items.jsonl`).
 
 ## Checkpointing
 
-Cada documento genera `pipeline/run_logs/<stem>.items.jsonl` con sus items. Si un run se interrumpe, reanudalo con:
+Every document writes its generated items to `pipeline/run_logs/<stem>.items.jsonl`. If a run is interrupted, resume it with:
 
 ```bash
 python pipeline/generate_dataset.py --resume
 ```
 
-Los documentos con checkpoint se cargan desde disco sin volver a llamar al modelo; los pendientes se procesan normalmente.
+Documents with a checkpoint are loaded from disk without calling the model again; the remaining ones are processed normally.
 
-## Formato de cada item
+## Item format
 
-Cada linea JSONL incluye:
+Each JSONL line contains:
 
 - `id`
 - `question`
 - `answer`
 - `type` (`factual|conceptual|inference|compare|definition`)
-- `difficulty` (`easy|medium|hard`, normalizado)
-- `context_source` (fragmento literal del contexto que sustenta la respuesta)
-- `context_source_verified` (booleano: `true` si el fragmento aparece literal en el contexto)
+- `difficulty` (`easy|medium|hard`, normalized)
+- `context_source` (literal fragment from the context supporting the answer)
+- `context_source_verified` (`true` if the fragment appears verbatim in the context)
 - `topic`
 - `topic_id`
 - `topic_keywords`
@@ -123,24 +141,24 @@ Cada linea JSONL incluye:
 - `created_at`
 - `context_excerpt`
 
-## Metadata reproducible
+## Reproducible metadata
 
-`dataset.meta.json` incluye:
+`dataset.meta.json` includes:
 
-- Conteos (`pdf_count`, `chunk_count`, `topic_count`, `generated_items`, `deduplicated_items`, `context_source_verified_items`).
-- `params` con todos los hiperparametros usados (incluye `only_doc`).
-- `runtime` con `python_version`, `platform`, versiones de `ollama`/`pypdf`/`pymupdf4llm` y `git_commit` (si se ejecuta dentro de un repo).
+- Counts (`pdf_count`, `chunk_count`, `topic_count`, `generated_items`, `deduplicated_items`, `context_source_verified_items`, `resumed_documents`).
+- `params` with every hyperparameter used (including `only_doc`, `resume`).
+- `runtime` with `python_version`, `platform`, installed versions of `ollama` / `pypdf` / `pymupdf4llm`, and `git_commit` (when executed inside a repo).
 
-## Robustez y validaciones
+## Robustness and validation
 
-- Manejo defensivo de errores de lectura PDF (PDF corrupto o pagina fallida).
-- Timeout + reintentos con backoff para llamadas a Ollama.
-- Verificacion inicial del modelo via `ollama.list()` (omitible con `--skip-model-check`).
-- Validacion de argumentos al inicio (`chunk_overlap < chunk_size`, rangos de parametros).
-- Fallback de topicos por chunks si el modelo no devuelve topicos parseables.
-- Deduplicacion exacta y semantica (bigrams) para reducir repeticiones.
-- Normalizacion de `type` y `difficulty` frente a salidas fuera de esquema.
-- Verificacion substring-real de `context_source` (flag `context_source_verified`).
+- Defensive handling of PDF read errors (corrupt PDF or failing pages).
+- Timeout + backoff retries for Ollama calls.
+- Initial model availability check via `ollama.list()` (skippable with `--skip-model-check`).
+- Argument validation at startup (`chunk_overlap < chunk_size`, parameter ranges).
+- Chunk-based topic fallback when the model fails to return parseable topics.
+- Exact + semantic (bigram) deduplication to reduce repetition.
+- `type` and `difficulty` normalization against out-of-schema model outputs.
+- Substring verification of `context_source` (exposed as `context_source_verified`).
 
 ## Tests
 
@@ -148,4 +166,3 @@ Cada linea JSONL incluye:
 pip install -r pipeline/requirements-dev.txt
 pytest tests/ -q
 ```
-
