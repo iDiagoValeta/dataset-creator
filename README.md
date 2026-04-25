@@ -4,17 +4,62 @@ Generate supervised QA datasets from PDFs using local Ollama models.
 
 ## Why this repo exists
 
-> Still a work in progress.
-
 I needed high-quality QA datasets for my own projects, especially in **Spanish (Castilian)** and **Valencian**, and the pipelines I had available didn't cover that workflow well. Until now, I was building those datasets **manually with NotebookLM** — slow, non-reproducible, and hard to iterate on.
 
 This repository automates that workflow end-to-end: extract text from PDFs, detect the document language, map topics, generate grounded QA pairs with a local Ollama model, deduplicate, and export ready-to-train JSONL splits — all while keeping traceability back to the source context.
 
-It is a personal tool first, so expect ongoing changes.
+## Example
 
-## Goal
+The `examples/` folder contains a complete generation run on a research paper about Random Forest models in high-frequency trading ([arXiv 2412.15448](https://arxiv.org/abs/2412.15448)):
 
-Given one or more PDFs in `pipeline/input/`, the pipeline produces a structured JSONL with questions answerable from the text, argumentable answers, and per-item context traceability.
+```
+examples/
+  2412.15448v2.pdf       — source document (25 chunks)
+  dataset.jsonl          — 22 QA items, all context-verified
+  dataset_train.jsonl    — 17 items (train split)
+  dataset_val.jsonl      —  2 items (val split)
+  dataset_test.jsonl     —  3 items (test split)
+  dataset.meta.json      — run metadata and quality stats
+  dataset.rejected.jsonl — 1 item rejected by the quality gate
+```
+
+Generated with default settings (`gemma4:e2b`, strict quality gate, language auto-detected as English). See `dataset.meta.json` for the full parameter set.
+
+## How it works
+
+The pipeline runs sequentially per PDF:
+
+**1. Extract and chunk**  
+Text is extracted with `pymupdf4llm` (markdown-aware) and falls back to `pypdf` on failure. The text is split into overlapping chunks (`chunk_size` characters with `chunk_overlap` overlap).
+
+**2. Detect language**  
+The extracted text is scanned for language-marker words (English, Spanish, Catalan, French, Portuguese) plus distinctive characters (`ñ`, `¿`, `ç`, `ã`, …). The detected language is stored per document and used for all model prompts unless `--language` forces a specific code.
+
+**3. Build a topic map**  
+The model receives a wide context window (up to `max_doc_context_chars` characters) and is asked to return a JSON list of topics with name, summary, and keywords. If the model output is not parseable, a compact retry is attempted. If topics are still too generic or garbage, the pipeline falls back to section headings extracted directly from the text. Topics are distributed uniformly across the document so that results, discussion, and conclusions sections are covered, not just the introduction.
+
+**4. Generate QA pairs per topic**  
+For each topic, the pipeline selects the most relevant chunks (lexical scoring) and sends them to the model with a generation prompt in the detected language. The model returns up to `questions_per_topic` JSON items, each with `question`, `answer`, `type`, `difficulty`, and `context_source`.
+
+**5. Verify context source**  
+Each item's `context_source` is checked against the topic context by substring match. If the model's suggested source is not found verbatim, the pipeline searches the context for the answer words and returns the best matching fragment. The result is stored as `context_source_verified: true/false`.
+
+**6. Apply the quality gate**  
+Before deduplication, the quality gate filters items:
+- `strict` (default): rejects items with unverified `context_source`, circular answers (answer adds no new information over the question), and PDF extraction artifacts.
+- `balanced`: applies the circular-answer and artifact checks but keeps unverified items.
+- `off`: no filtering.  
+
+Rejected items are written to `dataset.rejected.jsonl` with a `rejection_reason` field.
+
+**7. Deduplicate**  
+Exact duplicates and near-duplicates (bigram overlap on questions and answers) are removed from the accepted set.
+
+**8. Split and export**  
+The deduplicated items are shuffled deterministically (using `seed`) and split into train/val/test according to `--split`. Each split is written to its own JSONL file plus the combined `dataset.jsonl`.
+
+**9. Write metadata**  
+`dataset.meta.json` records all counts, quality stats, parameters, detected languages, and runtime information for reproducibility.
 
 ## Structure
 
@@ -24,18 +69,16 @@ dataset-creator/
 ├── README.md
 ├── pyproject.toml
 ├── .env.example
+├── examples/                  — sample PDF and generated dataset
 ├── .github/
 │   └── workflows/ci.yml
 ├── pipeline/
 │   ├── generate_dataset.py
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
-│   ├── input/
-│   │   └── .gitkeep
-│   ├── output/
-│   │   └── .gitkeep
-│   └── run_logs/
-│       └── .gitkeep
+│   ├── input/                 — drop PDFs here
+│   ├── output/                — generated JSONL and metadata
+│   └── run_logs/              — per-document debug logs and checkpoints
 └── tests/
     └── test_generate_dataset.py
 ```
@@ -43,158 +86,211 @@ dataset-creator/
 ## Requirements
 
 - Python 3.10+
-- Ollama running locally
+- [Ollama](https://ollama.com/) running locally
 - A model pulled in Ollama (recommended default: `gemma4:e2b`)
 
 ## Installation
 
 ```bash
-# Option 1: requirements files
+# Clone and enter the repo
+git clone https://github.com/nadiv/dataset-creator.git
+cd dataset-creator
+
+# Install dependencies
 pip install -r pipeline/requirements.txt
 pip install -r pipeline/requirements-dev.txt   # adds pytest
 
-# Option 2: pyproject
+# Or with pyproject
 pip install -e .
-pip install -e ".[dev]"                         # adds pytest
+pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` (or export the variables in your shell) and tweak as needed.
+Copy `.env.example` to `.env` (or export variables in your shell) and adjust as needed.
 
-## Environment variables
+## Quick start
 
-- `OLLAMA_DATASET_MODEL` (fallback: `OLLAMA_RAG_MODEL`, default `gemma4:e2b`)
-- `OLLAMA_TIMEOUT_SECS` (default `300`)
-- `OLLAMA_MAX_RETRIES` (default `3`) — retries on transient Ollama errors
-- `OLLAMA_RETRY_BACKOFF_SECS` (default `2.0`) — linear backoff between retries
-- `DATASET_LANGUAGE` (default `auto`; detects each PDF language. Use `es`, `ca`, `en`, etc. to force one)
-- `DATASET_CHUNK_SIZE` (default `3500`)
-- `DATASET_CHUNK_OVERLAP` (default `350`)
-- `DATASET_NUM_TOPICS` (default `8`)
-- `DATASET_QUESTIONS_PER_TOPIC` (default `6`)
-- `DATASET_SPLIT` (default `0.8,0.1,0.1`)
-- `DATASET_TEMPERATURE` (default `0.2`; `0.0` allowed for greedy decoding)
-- `DATASET_SEED` (default `42`; forwarded to Ollama for determinism)
-- `DATASET_MAX_DOC_CONTEXT_CHARS` (default `110000`)
-- `DATASET_MAX_TOPIC_CONTEXT_CHARS` (default `24000`)
-- `DATASET_LOG_LEVEL` (default `INFO`)
+1. Start Ollama and pull a model:
 
-## Quick usage
+```bash
+ollama pull gemma4:e2b
+```
 
-1. Drop PDFs into `pipeline/input/`.
-2. Run:
+2. Drop one or more PDFs into `pipeline/input/`.
+
+3. Run:
 
 ```bash
 python pipeline/generate_dataset.py
 ```
 
-Output:
+Output appears in `pipeline/output/`.
 
-- `pipeline/output/dataset.jsonl`
-- `pipeline/output/dataset_train.jsonl`
-- `pipeline/output/dataset_val.jsonl`
-- `pipeline/output/dataset_test.jsonl`
-- `pipeline/output/dataset.meta.json`
-- `pipeline/output/dataset.rejected.jsonl` (items filtered out by the quality gate)
-- `pipeline/run_logs/<pdf>.json` (raw model outputs per document/topic)
-- `pipeline/run_logs/<pdf>.items.jsonl` (per-document checkpoint, used by `--resume`)
+## CLI reference
 
-## CLI examples
+### Basic generation
 
 ```bash
-python pipeline/generate_dataset.py --model gemma4:e2b --num-topics 10 --questions-per-topic 8
-python pipeline/generate_dataset.py --split 0.7,0.15,0.15
-python pipeline/generate_dataset.py --language es   # force Spanish output instead of auto-detecting
-python pipeline/generate_dataset.py --language ca   # force Valencian / Catalan output
-python pipeline/generate_dataset.py --source-dir pipeline/input --output pipeline/output/thesis_es.jsonl
-python pipeline/generate_dataset.py --only-doc Operating_system.pdf
+python pipeline/generate_dataset.py
+```
+
+Processes all PDFs in `pipeline/input/` with default settings.
+
+### Common flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--model MODEL` | `gemma4:e2b` | Ollama model to use |
+| `--source-dir DIR` | `pipeline/input` | Folder with PDFs |
+| `--output FILE` | `pipeline/output/dataset.jsonl` | Output JSONL path |
+| `--num-topics N` | `8` | Max topics per document |
+| `--questions-per-topic N` | `6` | QA items per topic |
+| `--chunk-size N` | `3500` | Chunk size in characters |
+| `--chunk-overlap N` | `350` | Overlap between chunks |
+| `--split A,B,C` | `0.8,0.1,0.1` | Train/val/test proportions |
+| `--temperature F` | `0.2` | Sampling temperature |
+| `--seed N` | `42` | Random seed for reproducibility |
+| `--language CODE` | `auto` | Output language (`auto`, `es`, `en`, `ca`, …) |
+| `--quality-gate MODE` | `strict` | Quality filter mode (`strict`, `balanced`, `off`) |
+| `--only-doc NAMES` | — | Process only these PDFs (comma-separated filename or stem) |
+| `--resume` | off | Skip documents that already have a checkpoint |
+| `--skip-model-check` | off | Skip the initial `ollama.list()` availability check |
+| `--dry-run` | off | Estimate chunks and Ollama calls without generating |
+| `--clean-dry-run` | off | List generated files that `--clean` would delete |
+| `--clean` | off | Delete generated files from output and log folders |
+
+### Examples
+
+```bash
+# Use a different model and generate more items
+python pipeline/generate_dataset.py --model llama3.1:8b --num-topics 10 --questions-per-topic 8
+
+# Force Spanish output for all PDFs
+python pipeline/generate_dataset.py --language es
+
+# Force Valencian / Catalan output
+python pipeline/generate_dataset.py --language ca
+
+# Process only one PDF from a multi-PDF input folder
+python pipeline/generate_dataset.py --only-doc thesis.pdf
+
+# Process two specific PDFs
 python pipeline/generate_dataset.py --only-doc a.pdf,b.pdf
-python pipeline/generate_dataset.py --quality-gate strict
-python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
-python pipeline/generate_dataset.py --resume
+
+# Custom output path and split
+python pipeline/generate_dataset.py \
+  --output pipeline/output/thesis_es.jsonl \
+  --split 0.7,0.15,0.15
+
+# Estimate cost before committing to a full run
 python pipeline/generate_dataset.py --dry-run
+
+# Resume an interrupted run without reprocessing finished documents
+python pipeline/generate_dataset.py --resume
+
+# Apply a looser quality filter (keeps unverified items)
+python pipeline/generate_dataset.py --quality-gate balanced
+
+# Disable quality filtering entirely
+python pipeline/generate_dataset.py --quality-gate off
+
+# Preview which files --clean would delete, then clean
 python pipeline/generate_dataset.py --clean-dry-run
 python pipeline/generate_dataset.py --clean
+
+# Greedy decoding, skip model check (useful in CI or scripted pipelines)
+python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
 ```
 
-Notable flags:
+### Quality gate modes
 
-- `--language auto`: detect the language per PDF and generate topics/questions/answers in that source language. This is the default.
-- `--language <code>`: force a language for all PDFs (`es`, `en`, `ca`, etc.).
-- `--only-doc <names>`: process only the matching PDFs (filename or stem, case-insensitive). Comma-separated for multiple (e.g. `a.pdf,b.pdf`).
-- `--quality-gate strict|balanced|off`: filter generated items before writing the final dataset. `strict` is the default and keeps only clean, context-verified items; rejected rows are written to `dataset.rejected.jsonl`.
-- `--skip-model-check`: skip the initial `ollama.list()` availability check.
-- `--resume`: skip documents that already have a non-empty checkpoint file in `--debug-dir` (`<stem>.items.jsonl`).
-- `--dry-run`: extract and chunk PDFs, print stats (chunks, estimated Ollama calls and items), and exit without calling the model. Useful for sizing a run.
-- `--clean-dry-run`: print generated JSON/JSONL files that would be deleted from the output/log folders.
-- `--clean`: delete generated JSON/JSONL files from the output folder and debug/log folder, preserving `.gitkeep` and input PDFs.
+| Mode | What it keeps |
+|---|---|
+| `strict` | Only items with verified `context_source`, non-circular answers, and no extraction artifacts. This is the default. |
+| `balanced` | Keeps unverified items but still removes circular answers and extraction artifacts. |
+| `off` | Passes everything through. |
 
-## Language detection
+Rejected items are always written to `dataset.rejected.jsonl` with a `rejection_reason` field (`unverified_context_source`, `circular_answer`, `artifact_or_reference_noise`).
 
-By default, the pipeline detects each PDF's language from the extracted text and asks the model to generate topics, questions, and answers in that same language.
+### Language detection
 
-The detector is local and heuristic: it counts frequent marker words for English, Spanish, Catalan, French, and Portuguese, with small bonuses for distinctive characters such as `ñ`, `¿`, `ç`, `ã`, etc. The detected language is stored in per-item `document_language`, per-document debug logs, and `dataset.meta.json`.
-
-## Checkpointing
-
-Every document writes its generated items to `pipeline/run_logs/<stem>.items.jsonl`. If a run is interrupted, resume it with:
+By default (`--language auto`) the pipeline detects each PDF's language from the extracted text and asks the model to generate topics, questions, and answers in that language. Pass an explicit code to override for all PDFs:
 
 ```bash
-python pipeline/generate_dataset.py --resume
+python pipeline/generate_dataset.py --language es   # Spanish
+python pipeline/generate_dataset.py --language ca   # Catalan / Valencian
+python pipeline/generate_dataset.py --language en   # English
+python pipeline/generate_dataset.py --language fr   # French
+python pipeline/generate_dataset.py --language pt   # Portuguese
 ```
 
-Documents with a checkpoint are loaded from disk without calling the model again; the remaining ones are processed normally.
+### Checkpointing and resume
 
-## Item format
+Every processed document writes its items to `pipeline/run_logs/<stem>.items.jsonl`. If a run is interrupted, restart with `--resume` and the pipeline will skip any document that already has a checkpoint, reloading its items from disk instead of calling the model again.
 
-Each JSONL line contains:
+## Environment variables
 
-- `id`
-- `question`
-- `answer`
-- `type` (`factual|conceptual|inference|compare|definition`)
-- `difficulty` (`easy|medium|hard`, normalized)
-- `context_source` (literal fragment from the context supporting the answer)
-- `context_source_verified` (`true` if the fragment appears verbatim in the context)
-- `topic`
-- `topic_id`
-- `topic_keywords`
-- `document`
-- `document_language`
-- `source_chunk_ids`
-- `created_at`
-- `context_excerpt`
+All flags have environment variable equivalents. Variables take effect when the corresponding flag is not supplied on the command line.
 
-## Reproducible metadata
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_DATASET_MODEL` | `gemma4:e2b` | Primary generator model |
+| `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout in seconds |
+| `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
+| `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
+| `DATASET_LANGUAGE` | `auto` | Language code or `auto` |
+| `DATASET_CHUNK_SIZE` | `3500` | Chunk size in characters |
+| `DATASET_CHUNK_OVERLAP` | `350` | Overlap between chunks |
+| `DATASET_NUM_TOPICS` | `8` | Max topics per document |
+| `DATASET_QUESTIONS_PER_TOPIC` | `6` | QA items per topic |
+| `DATASET_SPLIT` | `0.8,0.1,0.1` | Train/val/test split ratios |
+| `DATASET_TEMPERATURE` | `0.2` | Sampling temperature |
+| `DATASET_SEED` | `42` | Random seed |
+| `DATASET_MAX_DOC_CONTEXT_CHARS` | `110000` | Max context for topic mapping |
+| `DATASET_MAX_TOPIC_CONTEXT_CHARS` | `24000` | Max context for QA generation |
+| `DATASET_QUALITY_GATE` | `strict` | Quality filter mode |
+| `DATASET_LOG_LEVEL` | `INFO` | Logging level (`DEBUG`/`INFO`/`WARNING`/`ERROR`) |
 
-`dataset.meta.json` includes:
+## Output files
 
-- Counts (`pdf_count`, `chunk_count`, `topic_count`, `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, `context_source_verified_items`, `resumed_documents`).
-- `quality` with the active quality gate, accepted/rejected counts, verified ratio, and rejection reasons.
-- `document_languages` mapping each PDF filename to its detected or forced language.
-- `params` with every hyperparameter used (including `only_doc`, `resume`).
-- `runtime` with `python_version`, `platform`, installed versions of `ollama` / `pypdf` / `pymupdf4llm`, and `git_commit` (when executed inside a repo).
+| File | Description |
+|---|---|
+| `dataset.jsonl` | All accepted items |
+| `dataset_train.jsonl` | Train split |
+| `dataset_val.jsonl` | Validation split |
+| `dataset_test.jsonl` | Test split |
+| `dataset.meta.json` | Run metadata, quality stats, parameters, runtime |
+| `dataset.rejected.jsonl` | Items filtered by the quality gate |
+| `run_logs/<stem>.json` | Raw model outputs per document and topic |
+| `run_logs/<stem>.items.jsonl` | Per-document checkpoint (used by `--resume`) |
 
-## Robustness and validation
+## Item schema
 
-- Defensive handling of PDF read errors (corrupt PDF or failing pages).
-- Timeout + backoff retries for Ollama calls.
-- Initial model availability check via `ollama.list()` (skippable with `--skip-model-check`).
-- Argument validation at startup (`chunk_overlap < chunk_size`, parameter ranges).
-- Per-document language detection by default, with manual override through `--language`.
-- Chunk-based topic fallback when the model fails to return parseable topics.
-- Compact topic-map retry when the full-document topic map is not parseable.
-- Section-heading topic refinement when the model returns overly generic topics.
-- Exact + semantic (bigram) deduplication to reduce repetition, including duplicate answers.
-- `type` and `difficulty` normalization against out-of-schema model outputs.
-- Context-source repair and substring verification of `context_source` (exposed as `context_source_verified`).
-- Strict quality gate that rejects unverified items and common PDF extraction artifacts from the final JSONL.
+Each line in the JSONL files is a JSON object with these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique item identifier |
+| `question` | string | Generated question |
+| `answer` | string | Generated answer |
+| `type` | string | `factual` / `conceptual` / `inference` / `compare` / `definition` |
+| `difficulty` | string | `easy` / `medium` / `hard` |
+| `context_source` | string | Literal fragment from the source context supporting the answer |
+| `context_source_verified` | bool | `true` if the fragment appears verbatim in the context window |
+| `topic` | string | Topic name the item was generated under |
+| `topic_id` | string | Topic identifier (e.g. `topic-00`) |
+| `topic_keywords` | array | Keywords associated with the topic |
+| `document` | string | Source PDF filename |
+| `document_language` | string | Detected or forced language code |
+| `source_chunk_ids` | array | Chunk IDs where the answer source was found |
+| `created_at` | string | ISO 8601 timestamp |
+| `context_excerpt` | string | Beginning of the topic context window (diagnostic) |
 
 ## Tests and lint
 
 ```bash
 pip install -r pipeline/requirements-dev.txt
-pytest           # uses config in pyproject.toml
+pytest
 ruff check .
 ```
 
-Continuous integration runs both on `push` and `pull_request` against `main` via `.github/workflows/ci.yml` on Python 3.10 / 3.11 / 3.12.
+Continuous integration runs on every push and pull request against `main` via `.github/workflows/ci.yml`, testing Python 3.10, 3.11, and 3.12.

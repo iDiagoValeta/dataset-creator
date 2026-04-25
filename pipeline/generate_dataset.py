@@ -231,8 +231,14 @@ def clean_markdown_artifacts(text: str) -> str:
     cleaned = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r"\1", cleaned)
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
     cleaned = re.sub(r"\[\[\d+\]\]", " ", cleaned)
-    cleaned = re.sub(r"(?<![A-Za-z/])\b\d{1,3}\b(?![A-Za-z/])", " ", cleaned)
+    # Strip isolated 1-3 digit numbers (page/section artifacts).
+    # Preserve: decimals (0.749), percentages (60%), compound adjectives (10-year, 30-minute).
+    cleaned = re.sub(r"(?<![A-Za-z/.\d-])\b\d{1,3}\b(?![A-Za-z/.\d%-])", " ", cleaned)
     cleaned = re.sub(r"[~`*_#>{}\[\]|]+", " ", cleaned)
+    # Slash-separated table cells: "Word / Word / Word"
+    cleaned = re.sub(r"(?:\b\w+\b\s*/\s*){2,}\w+\b", " ", cleaned)
+    # Pure numeric table rows: four or more numbers on a single line
+    cleaned = re.sub(r"^\s*[-+]?\d*\.?\d+(?:\s+[-+]?\d*\.?\d+){3,}\s*$", " ", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return normalize_whitespace(cleaned)
 
@@ -244,7 +250,7 @@ def clean_generated_text(text: str) -> str:
     cleaned = cleaned.replace("Ã¢â‚¬Ëœ", "'").replace("Ã¢â‚¬â„¢", "'")
     cleaned = cleaned.replace("Ã¢â‚¬Å“", '"').replace("Ã¢â‚¬Â", '"')
     cleaned = re.sub(r"==\s*picture\s+\d+\s+x\s+\d+\s+intentionally omitted\s*<==", " ", cleaned, flags=re.I)
-    cleaned = re.sub(r"(?<![A-Za-z/])\b\d{2,3}\b(?![A-Za-z/])", " ", cleaned)
+    cleaned = re.sub(r"(?<![A-Za-z/.\d-])\b\d{2,3}\b(?![A-Za-z/.\d%-])", " ", cleaned)
     cleaned = normalize_whitespace(cleaned)
     if cleaned:
         cleaned = cleaned[0].upper() + cleaned[1:]
@@ -410,7 +416,10 @@ def extract_section_headings(text: str) -> list[str]:
         line = line.replace("Histor y", "History")
         if not (3 <= len(line) <= 80):
             continue
-        if re.search(r"https?://|ISBN|\[\d+\]|\d{4}", line):
+        if re.search(r"https?://|ISBN|\[\d+\]|\d{4}|@", line):
+            continue
+        # Affiliation lines start with a digit directly glued to a letter ("2Department")
+        if re.match(r"^\d[A-Za-z]", line):
             continue
         words = line.split()
         if len(words) > 8:
@@ -419,6 +428,9 @@ def extract_section_headings(text: str) -> list[str]:
         if not letters.strip():
             continue
         if line.endswith(".") or line.endswith(","):
+            continue
+        # Skip institution/affiliation lines
+        if re.search(r"\b(?:University|Department|Institute|Laboratory|College|School)\b", line, re.I):
             continue
         lowercase_words = sum(
             1
@@ -439,7 +451,12 @@ def build_section_topics_from_text(text: str, num_topics: int) -> list[Topic]:
         heading for heading in headings
         if heading.lower() not in blocked and not heading.lower().startswith("list of ")
     ]
-    selected = preferred[:num_topics]
+    if len(preferred) <= num_topics:
+        selected = preferred
+    else:
+        # Spread uniformly across the full heading list so results/conclusions are included.
+        indices = [int(i * len(preferred) / num_topics) for i in range(num_topics)]
+        selected = [preferred[idx] for idx in indices]
     topics: list[Topic] = []
     for idx, heading in enumerate(selected):
         topics.append(
@@ -463,6 +480,36 @@ def topics_are_too_generic(topics: Sequence[Topic]) -> bool:
         if any(term in name for term in GENERIC_TOPIC_TERMS):
             generic += 1
     return generic >= max(2, len(topics) // 2)
+
+
+def topics_mostly_invalid(topics: Sequence[Topic]) -> bool:
+    """Return True when most topics fail the is_valid_topic_name check."""
+    if not topics:
+        return True
+    invalid = sum(1 for t in topics if not is_valid_topic_name(t.name))
+    return invalid >= max(2, len(topics) // 2)
+
+
+def is_valid_topic_name(name: str) -> bool:
+    """Return True if name looks like a real topic, not a text fragment or table artifact."""
+    if not name or len(name) < 5:
+        return False
+    # Accept section-style headings: "1 Introduction", "2.1 Background", "A. Appendix"
+    if re.match(r"^[\dA-Z][\d.]*\s+[A-Za-z]", name):
+        return len(re.findall(r"[A-Za-zÀ-ÿ]{3,}", name)) >= 1
+    if not name[0].isalpha():
+        return False
+    real_words = re.findall(r"[A-Za-zÀ-ÿ]{3,}", name)
+    if not real_words:
+        return False
+    if len(real_words) < 2:
+        # Single-word topic: only valid when the word itself is substantial (≥6 chars).
+        # This accepts "Abstract", "Introduction", "Methodology" but rejects "Topic", "Rf".
+        if not re.search(r"[A-Za-zÀ-ÿ]{6,}", name):
+            return False
+    if name.count("/") > 2:
+        return False
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -723,6 +770,19 @@ def try_parse_json_payload(payload: str) -> dict[str, Any]:
                     except json.JSONDecodeError:
                         break
 
+    # Third attempt: extract completed topic objects from a truncated JSON array.
+    partial_topics: list[dict[str, Any]] = []
+    for m in re.finditer(r'\{[^{}]*?"name"\s*:\s*"([^"]+)"[^{}]*?\}', stripped, re.S):
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and obj.get("name"):
+                partial_topics.append(obj)
+        except json.JSONDecodeError:
+            pass
+    if partial_topics:
+        logger.debug("JSON truncado; se rescataron %d topicos parciales.", len(partial_topics))
+        return {"topics": partial_topics}
+
     logger.debug("No se pudo parsear JSON del modelo; se retorna payload vacio.")
     return {"items": []}
 
@@ -957,8 +1017,8 @@ def infer_topic_name_from_chunk(chunk_text: str, fallback_index: int) -> str:
         line = line.strip().strip("-*#")
         if len(line) < 8:
             continue
-        # Prefer short heading-like lines.
-        if len(line) <= 90:
+        # Prefer short heading-like lines that look like real topics.
+        if len(line) <= 90 and is_valid_topic_name(line):
             return line
         break
 
@@ -1133,6 +1193,20 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
     return False
 
 
+def is_circular_answer(question: str, answer: str) -> bool:
+    """True when the answer adds fewer than 3 new content tokens (words or numbers) vs. the question."""
+    q_words = set(_content_words(question))
+    a_words = _content_words(answer)
+    if not a_words:
+        return True
+    new_words = [w for w in a_words if w not in q_words]
+    # Numbers/percentages count as new content too (e.g. "14%–15%" in the answer)
+    q_nums = set(re.findall(r"\d+(?:[.,]\d+)?%?", question))
+    a_nums = set(re.findall(r"\d+(?:[.,]\d+)?%?", answer))
+    new_nums = a_nums - q_nums
+    return len(new_words) + len(new_nums) < 3
+
+
 def generate_items_for_topic(
     model: str,
     document: str,
@@ -1148,6 +1222,15 @@ def generate_items_for_topic(
     """Generate normalized Q/A items for one topic."""
     debug_attempts: list[dict[str, Any]] = []
     item_document_language = document_language or language
+
+    # Strip leading sentence fragment caused by chunk boundary cuts.
+    # Only strips when the chunk text starts with ≤3 lowercase chars then a space
+    # (e.g. "y environments..." or "nd of..."), avoiding longer mid-word cuts like "icient...".
+    topic_context = re.sub(
+        r"^(\[[\w.-]+-chunk-\d{4,}\]\s+)[a-z]{1,3}\s[^\n.!?]*[.!?]\s*",
+        r"\1",
+        topic_context,
+    ).strip()
 
     def _extract_raw_items(parsed_obj: dict[str, Any]) -> list[Any]:
         raw_local = parsed_obj.get("items", [])
@@ -1174,9 +1257,13 @@ def generate_items_for_topic(
             difficulty = raw_difficulty if raw_difficulty in VALID_DIFFICULTIES else "medium"
 
             raw_source = clean_generated_text(str(item.get("context_source", "")).strip())[:300]
+            # Strip chunk-id markup the model may have copied from the prompt (e.g. "[doc-chunk-0001] text")
+            raw_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", raw_source).strip()
             context_source, context_verified = find_verified_context_source(raw_source, answer, topic_context)
             if not context_source:
                 context_source = normalize_whitespace(topic_context[:300])
+            # Never let internal chunk-id markup reach the output field
+            context_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", context_source).strip()
 
             normalized_local.append(
                 {
@@ -1333,6 +1420,11 @@ def apply_quality_gate(
             continue
         if has_quality_artifact(item):
             reject(item, "artifact_or_reference_noise")
+            continue
+        if gate in ("strict", "balanced") and is_circular_answer(
+            str(item.get("question", "")), str(item.get("answer", ""))
+        ):
+            reject(item, "circular_answer")
             continue
         if gate == "strict" and not item.get("context_source_verified"):
             reject(item, "unverified_context_source")
@@ -1841,19 +1933,29 @@ def main() -> None:
                 if doc_debug["topic_map_attempts"][-1]["raw_content"]
                 else "(vacio)",
             )
-            topics = build_fallback_topics_from_chunks(chunks=chunks, num_topics=args.num_topics)
-            doc_debug["topic_map_strategy"] = "fallback_from_chunks"
+            chunk_topics = build_fallback_topics_from_chunks(chunks=chunks, num_topics=args.num_topics)
+            section_topics = build_section_topics_from_text(raw_text, args.num_topics)
+            if section_topics:
+                topics = section_topics
+                doc_debug["topic_map_strategy"] = "fallback_section_headings"
+                print(
+                    f"  - Aviso: el modelo no devolvio topicos parseables para {pdf_path.name}; "
+                    f"usando secciones del documento ({len(topics)} topicos)."
+                )
+            else:
+                topics = chunk_topics
+                doc_debug["topic_map_strategy"] = "fallback_from_chunks"
+                print(
+                    f"  - Aviso: el modelo no devolvio topicos parseables para {pdf_path.name}; "
+                    f"usando fallback de chunks ({len(topics)} topicos)."
+                )
             doc_debug["topic_map_payload"] = {
                 "topics": [
                     {"name": t.name, "summary": t.summary, "keywords": t.keywords}
                     for t in topics
                 ]
             }
-            print(
-                f"  - Aviso: el modelo no devolvio topicos parseables para {pdf_path.name}; "
-                f"usando fallback ({len(topics)} topicos)."
-            )
-        elif topics_are_too_generic(topics):
+        elif topics_are_too_generic(topics) or topics_mostly_invalid(topics):
             section_topics = build_section_topics_from_text(raw_text, args.num_topics)
             if section_topics:
                 doc_debug["llm_topics_replaced"] = [
@@ -1868,7 +1970,7 @@ def main() -> None:
                         for t in topics
                     ]
                 }
-                print("  - Aviso: topicos LLM demasiado genericos; usando secciones detectadas.")
+                print("  - Aviso: topicos LLM invalidos o genericos; usando secciones del documento.")
 
         if not topics:
             print(f"  - Saltado: no se pudieron construir topicos para {pdf_path.name}")
@@ -1880,6 +1982,9 @@ def main() -> None:
         print(f"  - Topicos detectados: {len(topics)}")
         for topic_idx, topic in enumerate(topics, start=1):
             print(f"    [{topic_idx}/{len(topics)}] {topic.name[:60]}", end="", flush=True)
+            if not is_valid_topic_name(topic.name):
+                print(" -> 0 items (nombre de topico invalido, saltado)")
+                continue
             topic_context = build_topic_context(
                 chunks=chunks,
                 topic=topic,
