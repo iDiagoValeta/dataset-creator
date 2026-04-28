@@ -15,15 +15,15 @@ The `examples/` folder contains a complete generation run on a research paper ab
 ```
 examples/
   2412.15448v2.pdf       — source document (25 chunks)
-  dataset.jsonl          — 22 QA items, all context-verified
-  dataset_train.jsonl    — 17 items (train split)
-  dataset_val.jsonl      —  2 items (val split)
-  dataset_test.jsonl     —  3 items (test split)
+  dataset.jsonl          — 12 QA items, all context-verified
+  dataset_train.jsonl    —  9 items (train split)
+  dataset_val.jsonl      —  1 item  (val split)
+  dataset_test.jsonl     —  2 items (test split)
   dataset.meta.json      — run metadata and quality stats
-  dataset.rejected.jsonl — 1 item rejected by the quality gate
+  dataset.rejected.jsonl — 6 items rejected by the quality gate
 ```
 
-Generated with default settings (`gemma4:e4b`, strict quality gate, language auto-detected as English). See `dataset.meta.json` for the full parameter set.
+Generated with `gemma4:e4b`, strict quality gate, language auto-detected as English, `--retrieval semantic` (fell back to lexical — model does not expose an embeddings endpoint). The 6 rejected items came from a chunk containing a PDF picture placeholder (`== picture x intentionally omitted ==`), correctly caught by the artifact filter. See `dataset.meta.json` for the full parameter set.
 
 ## How it works
 
