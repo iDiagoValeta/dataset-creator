@@ -1,6 +1,6 @@
 {
-  "created_at": "2026-04-25T15:15:48.567209+00:00",
-  "model": "gemma4:e2b",
+  "created_at": "2026-04-28T22:42:32.919065+00:00",
+  "model": "gemma4:e4b",
   "language": "auto",
   "document_languages": {
     "2412.15448v2.pdf": "en"
@@ -9,30 +9,30 @@
   "output": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\output\\dataset.jsonl",
   "pdf_count": 1,
   "chunk_count": 25,
-  "topic_count": 4,
-  "generated_items": 24,
-  "deduplicated_items": 22,
-  "accepted_items": 22,
-  "rejected_items": 1,
-  "context_source_verified_items": 22,
+  "topic_count": 3,
+  "generated_items": 18,
+  "deduplicated_items": 12,
+  "accepted_items": 12,
+  "rejected_items": 6,
+  "context_source_verified_items": 12,
   "quality": {
     "gate": "strict",
-    "accepted_items": 22,
-    "rejected_items": 1,
-    "verified_items": 22,
+    "accepted_items": 12,
+    "rejected_items": 6,
+    "verified_items": 12,
     "verified_ratio": 1.0,
     "rejection_reasons": {
-      "circular_answer": 1
+      "artifact_or_reference_noise": 6
     },
-    "accepted_items_before_dedup": 23,
-    "verified_items_before_dedup": 23,
-    "duplicate_items_removed_after_quality": 1
+    "accepted_items_before_dedup": 12,
+    "verified_items_before_dedup": 12,
+    "duplicate_items_removed_after_quality": 0
   },
   "resumed_documents": 0,
   "split": {
-    "train": 17,
-    "val": 2,
-    "test": 3
+    "train": 9,
+    "val": 1,
+    "test": 2
   },
   "params": {
     "chunk_size": 3500,
@@ -55,6 +55,6 @@
       "pypdf": "6.10.2",
       "pymupdf4llm": "1.27.2.2"
     },
-    "git_commit": "12b0a11"
+    "git_commit": "10ffc2c"
   }
 }
