@@ -33,7 +33,18 @@ The primary use case is producing QA corpora in the same language as each source
 
 ```text
 pipeline/
-  generate_dataset.py
+  generate_dataset.py    ← orchestrator and CLI entry point
+  engine/
+    _config.py           ← constants, dataclasses, logging
+    _text.py             ← text transforms, language detection
+    _pdf.py              ← PDF extraction and chunking
+    _prompts.py          ← LLM prompt builders and JSON parser
+    _ollama.py           ← Ollama client wrapper
+    _topics.py           ← topic parsing, validation, retrieval
+    _quality.py          ← quality gate and deduplication
+    _generation.py       ← QA generation per topic
+    _export.py           ← JSONL I/O, splits, metadata
+    _cli.py              ← argparse, validation, dry-run
   requirements.txt
   requirements-dev.txt
   input/
@@ -72,10 +83,12 @@ pyproject.toml
 
 | Variable | Default | Usage |
 |---|---|---|
-| `OLLAMA_DATASET_MODEL` | `gemma4:e2b` | Primary generator model |
+| `OLLAMA_DATASET_MODEL` | `gemma4:e4b` | Primary generator model |
 | `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout |
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
+| `OLLAMA_EMBEDDING_MODEL` | same as `OLLAMA_DATASET_MODEL` | Ollama model for semantic embeddings (`--retrieval semantic`) |
+| `DATASET_RETRIEVAL` | `lexical` | Chunk retrieval mode (`lexical` or `semantic`) |
 | `DATASET_LOG_LEVEL` | `INFO` | Logging level (`DEBUG/INFO/WARNING/ERROR`) |
 | `DATASET_LANGUAGE` | `auto` | Detect language per PDF; use `es`, `en`, `ca`, etc. to force output |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size |
@@ -91,6 +104,10 @@ pyproject.toml
 - `--language auto` is the default and should generate topics, questions, and answers in the detected source-document language.
 - `--language <code>` forces one language for all PDFs.
 - `--quality-gate strict|balanced|off` controls final dataset filtering. Default `strict` rejects unverified items and common extraction artifacts; rejected rows are written to `dataset.rejected.jsonl`.
+- `--retrieval lexical|semantic` selects the chunk retrieval strategy for topic context building. Default `lexical` uses substring scoring. `semantic` uses Ollama embeddings (cosine similarity); embeddings are cached per chunk within a document. Requires the embedding model to be available in Ollama.
+- `--embedding-model MODEL` sets the Ollama model used for embeddings when `--retrieval semantic`. Defaults to the same value as `--model`.
+- `--topics-file PATH` loads a YAML (requires `pyyaml`) or plain-text file with user-defined topics. Skips the LLM topic mapping step entirely. Topics get `topic_id` with prefix `user-`.
+- `--questions-file PATH` loads a plain-text file with one seed question per line. Skips topic mapping; generates one answer per question. Items get `topic_id` with prefix `seed-`. Mutually exclusive with `--topics-file`. Both flags are compatible with `--only-doc`, `--resume`, and `--quality-gate`.
 - `--dry-run` extracts/chunks PDFs and reports detected language, estimated topics/items, and estimated Ollama calls without model generation.
 - `--clean-dry-run` lists generated JSON/JSONL artifacts that would be removed.
 - `--clean` removes generated `.json` and `.jsonl` files from `pipeline/output` and `pipeline/run_logs`, preserving `.gitkeep` and input PDFs.

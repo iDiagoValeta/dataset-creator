@@ -23,7 +23,7 @@ examples/
   dataset.rejected.jsonl — 1 item rejected by the quality gate
 ```
 
-Generated with default settings (`gemma4:e2b`, strict quality gate, language auto-detected as English). See `dataset.meta.json` for the full parameter set.
+Generated with default settings (`gemma4:e4b`, strict quality gate, language auto-detected as English). See `dataset.meta.json` for the full parameter set.
 
 ## How it works
 
@@ -39,7 +39,7 @@ The extracted text is scanned for language-marker words (English, Spanish, Catal
 The model receives a wide context window (up to `max_doc_context_chars` characters) and is asked to return a JSON list of topics with name, summary, and keywords. If the model output is not parseable, a compact retry is attempted. If topics are still too generic or garbage, the pipeline falls back to section headings extracted directly from the text. Topics are distributed uniformly across the document so that results, discussion, and conclusions sections are covered, not just the introduction.
 
 **4. Generate QA pairs per topic**  
-For each topic, the pipeline selects the most relevant chunks (lexical scoring) and sends them to the model with a generation prompt in the detected language. The model returns up to `questions_per_topic` JSON items, each with `question`, `answer`, `type`, `difficulty`, and `context_source`.
+For each topic, the pipeline selects the most relevant chunks (lexical scoring by default; embedding-based cosine similarity with `--retrieval semantic`) and sends them to the model with a generation prompt in the detected language. The model returns up to `questions_per_topic` JSON items, each with `question`, `answer`, `type`, `difficulty`, and `context_source`.
 
 **5. Verify context source**  
 Each item's `context_source` is checked against the topic context by substring match. If the model's suggested source is not found verbatim, the pipeline searches the context for the answer words and returns the best matching fragment. The result is stored as `context_source_verified: true/false`.
@@ -73,7 +73,18 @@ dataset-creator/
 ├── .github/
 │   └── workflows/ci.yml
 ├── pipeline/
-│   ├── generate_dataset.py
+│   ├── generate_dataset.py    — orchestrator and CLI entry point
+│   ├── engine/                — pipeline submodules
+│   │   ├── _config.py         — constants, dataclasses, logging
+│   │   ├── _text.py           — text transforms, language detection
+│   │   ├── _pdf.py            — PDF extraction and chunking
+│   │   ├── _prompts.py        — LLM prompt builders and JSON parser
+│   │   ├── _ollama.py         — Ollama client wrapper
+│   │   ├── _topics.py         — topic parsing, validation, retrieval
+│   │   ├── _quality.py        — quality gate and deduplication
+│   │   ├── _generation.py     — QA generation per topic
+│   │   ├── _export.py         — JSONL I/O, splits, metadata
+│   │   └── _cli.py            — argparse, validation, dry-run
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
 │   ├── input/                 — drop PDFs here
@@ -87,7 +98,7 @@ dataset-creator/
 
 - Python 3.10+
 - [Ollama](https://ollama.com/) running locally
-- A model pulled in Ollama (recommended default: `gemma4:e2b`)
+- A model pulled in Ollama (recommended default: `gemma4:e4b`)
 
 ## Installation
 
@@ -112,7 +123,7 @@ Copy `.env.example` to `.env` (or export variables in your shell) and adjust as 
 1. Start Ollama and pull a model:
 
 ```bash
-ollama pull gemma4:e2b
+ollama pull gemma4:e4b
 ```
 
 2. Drop one or more PDFs into `pipeline/input/`.
@@ -139,7 +150,7 @@ Processes all PDFs in `pipeline/input/` with default settings.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model MODEL` | `gemma4:e2b` | Ollama model to use |
+| `--model MODEL` | `gemma4:e4b` | Ollama model to use |
 | `--source-dir DIR` | `pipeline/input` | Folder with PDFs |
 | `--output FILE` | `pipeline/output/dataset.jsonl` | Output JSONL path |
 | `--num-topics N` | `8` | Max topics per document |
@@ -151,6 +162,10 @@ Processes all PDFs in `pipeline/input/` with default settings.
 | `--seed N` | `42` | Random seed for reproducibility |
 | `--language CODE` | `auto` | Output language (`auto`, `es`, `en`, `ca`, …) |
 | `--quality-gate MODE` | `strict` | Quality filter mode (`strict`, `balanced`, `off`) |
+| `--retrieval MODE` | `lexical` | Chunk selection method: `lexical` (default) or `semantic` (embedding cosine similarity) |
+| `--embedding-model MODEL` | same as `--model` | Ollama model used for embeddings when `--retrieval semantic` |
+| `--topics-file PATH` | — | YAML or plain-text file with user-defined topics. Skips automatic topic mapping. |
+| `--questions-file PATH` | — | Plain-text file with one seed question per line. Generates answers for each question. Mutually exclusive with `--topics-file`. |
 | `--only-doc NAMES` | — | Process only these PDFs (comma-separated filename or stem) |
 | `--resume` | off | Skip documents that already have a checkpoint |
 | `--skip-model-check` | off | Skip the initial `ollama.list()` availability check |
@@ -227,16 +242,84 @@ python pipeline/generate_dataset.py --language pt   # Portuguese
 
 Every processed document writes its items to `pipeline/run_logs/<stem>.items.jsonl`. If a run is interrupted, restart with `--resume` and the pipeline will skip any document that already has a checkpoint, reloading its items from disk instead of calling the model again.
 
+### Semantic chunk retrieval
+
+By default the pipeline selects the most relevant chunks for each topic using a simple lexical score (substring matching). Pass `--retrieval semantic` to use embedding-based cosine similarity instead — useful when the topic vocabulary differs from the text vocabulary (synonyms, domain jargon, multilingual documents).
+
+```bash
+# Pull an embedding model first (any Ollama model works; the default is the same as --model)
+ollama pull gemma4:e4b
+
+# Enable semantic retrieval
+python pipeline/generate_dataset.py --retrieval semantic
+
+# Use a different model for embeddings
+python pipeline/generate_dataset.py --retrieval semantic --embedding-model nomic-embed-text
+```
+
+Chunk embeddings are cached in memory across topics within the same document, so each chunk is embedded only once per run. The lexical fast-path (exact topic-name match in chunk text) is always attempted first regardless of retrieval mode.
+
+### User-supplied topics and seed questions
+
+#### `--topics-file` — define topics manually
+
+Provide a YAML or plain-text file to bypass automatic topic mapping entirely. The topics you specify are used for all processed PDFs.
+
+**YAML format** (requires `pip install pyyaml`):
+
+```yaml
+topics:
+  - name: "Métodos estadísticos"
+    summary: "Análisis de regresión y tests de hipótesis"   # optional
+    keywords: ["regresión", "hipótesis", "p-value"]          # optional
+  - name: "Resultados del modelo"
+```
+
+**Plain text format** (one topic per line):
+
+```
+Métodos estadísticos
+Resultados del modelo
+Conclusiones
+```
+
+```bash
+python pipeline/generate_dataset.py --topics-file pipeline/input/topics.yaml
+python pipeline/generate_dataset.py --topics-file pipeline/input/topics.txt
+```
+
+Topics defined in the file get `topic_id` values prefixed with `user-` (e.g. `user-00`, `user-01`).
+
+#### `--questions-file` — seed questions with generated answers
+
+Provide a plain-text file with one question per line. The pipeline skips topic mapping entirely and generates an answer for each question from the most relevant document context.
+
+```
+¿Cuál es la hipótesis central del artículo?
+¿Qué métodos de validación se utilizan?
+¿Cuáles son las principales limitaciones del estudio?
+```
+
+```bash
+python pipeline/generate_dataset.py --questions-file pipeline/input/preguntas.txt
+```
+
+Seed-question items have `topic_id` values prefixed with `seed-` (e.g. `seed-00`). All other fields — `context_source`, `context_source_verified`, quality gate, deduplication — work exactly as in normal mode.
+
+`--topics-file` and `--questions-file` are mutually exclusive. Both are compatible with `--only-doc`, `--resume`, and `--quality-gate`.
+
 ## Environment variables
 
 All flags have environment variable equivalents. Variables take effect when the corresponding flag is not supplied on the command line.
 
 | Variable | Default | Description |
 |---|---|---|
-| `OLLAMA_DATASET_MODEL` | `gemma4:e2b` | Primary generator model |
+| `OLLAMA_DATASET_MODEL` | `gemma4:e4b` | Primary generator model |
 | `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout in seconds |
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
+| `OLLAMA_EMBEDDING_MODEL` | same as `OLLAMA_DATASET_MODEL` | Ollama model for semantic embeddings (`--retrieval semantic`) |
+| `DATASET_RETRIEVAL` | `lexical` | Chunk retrieval mode (`lexical` or `semantic`) |
 | `DATASET_LANGUAGE` | `auto` | Language code or `auto` |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size in characters |
 | `DATASET_CHUNK_OVERLAP` | `350` | Overlap between chunks |
