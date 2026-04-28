@@ -265,7 +265,7 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
             "",
         )
 
-    monkeypatch.setattr(gd, "call_ollama_json", fake_call)
+    monkeypatch.setattr("engine._generation.call_ollama_json", fake_call)
     items, _ = gd.generate_items_for_topic(
         model="m",
         document="doc.pdf",
@@ -339,7 +339,7 @@ def test_context_source_falls_back_when_not_substring(monkeypatch):
             "",
         )
 
-    monkeypatch.setattr(gd, "call_ollama_json", fake_call)
+    monkeypatch.setattr("engine._generation.call_ollama_json", fake_call)
     items, _ = gd.generate_items_for_topic(
         model="m",
         document="doc.pdf",
@@ -371,3 +371,182 @@ def test_apply_quality_gate_strict_rejects_unverified_and_artifacts():
     assert [item["id"] for item in accepted] == ["ok"]
     assert {item["id"] for item in rejected} == {"bad-source", "bad-artifact"}
     assert stats["verified_ratio"] == 1.0
+
+
+# --- cosine_similarity ------------------------------------------------
+
+def test_cosine_similarity_identical_vectors():
+    assert gd.cosine_similarity([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]) == pytest.approx(1.0)
+
+
+def test_cosine_similarity_orthogonal_vectors():
+    assert gd.cosine_similarity([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+
+
+def test_cosine_similarity_zero_vector():
+    assert gd.cosine_similarity([0.0, 0.0], [1.0, 0.0]) == 0.0
+
+
+# --- load_topics_file -------------------------------------------------
+
+def test_load_topics_file_plaintext(tmp_path):
+    f = tmp_path / "topics.txt"
+    f.write_text("Métodos estadísticos\n# comentario ignorado\n\nResultados experimentales\n", encoding="utf-8")
+    topics = gd.load_topics_file(f)
+    assert len(topics) == 2
+    assert topics[0].name == "Métodos estadísticos"
+    assert topics[1].name == "Resultados experimentales"
+    assert topics[0].topic_id == "user-00"
+    assert topics[1].topic_id == "user-01"
+
+
+def test_load_topics_file_yaml(tmp_path):
+    pytest.importorskip("yaml")
+    f = tmp_path / "topics.yaml"
+    f.write_text(
+        "topics:\n"
+        "  - name: Introducción\n"
+        "    summary: Descripción general\n"
+        "    keywords: [resumen, contexto]\n"
+        "  - name: Metodología\n",
+        encoding="utf-8",
+    )
+    topics = gd.load_topics_file(f)
+    assert len(topics) == 2
+    assert topics[0].summary == "Descripción general"
+    assert topics[0].keywords == ["resumen", "contexto"]
+    assert topics[1].summary == "Metodología"
+    assert len(topics[1].keywords) > 0
+
+
+def test_load_topics_file_empty_raises(tmp_path):
+    f = tmp_path / "empty.txt"
+    f.write_text("# solo comentarios\n\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no se encontraron temas"):
+        gd.load_topics_file(f)
+
+
+# --- load_questions_file ----------------------------------------------
+
+def test_load_questions_file_filters_blanks(tmp_path):
+    f = tmp_path / "qs.txt"
+    f.write_text("¿Qué es el EMH?\n# ignorado\n\n¿Cómo funciona el modelo?\n", encoding="utf-8")
+    qs = gd.load_questions_file(f)
+    assert qs == ["¿Qué es el EMH?", "¿Cómo funciona el modelo?"]
+
+
+def test_load_questions_file_empty_raises(tmp_path):
+    f = tmp_path / "empty.txt"
+    f.write_text("\n\n# nada\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no se encontraron preguntas"):
+        gd.load_questions_file(f)
+
+
+# --- questions_to_topics ----------------------------------------------
+
+def test_questions_to_topics_structure():
+    qs = ["¿Cuál es la hipótesis?", "¿Qué métodos se usaron?", "¿Cuáles son los resultados?"]
+    topics = gd.questions_to_topics(qs)
+    assert len(topics) == 3
+    for i, (t, q) in enumerate(zip(topics, qs, strict=False)):
+        assert t.topic_id == f"seed-{i:02d}"
+        assert t.name == q
+        assert t.summary == q
+        assert isinstance(t.keywords, list)
+
+
+# --- get_chunk_embedding (caching) ------------------------------------
+
+def test_get_chunk_embedding_caches_result(monkeypatch):
+    call_count = {"n": 0}
+
+    class FakeResp:
+        embedding = [0.1, 0.2, 0.3]
+
+    class FakeClient:
+        def embeddings(self, model, prompt):  # noqa: ARG002
+            call_count["n"] += 1
+            return FakeResp()
+
+    monkeypatch.setattr(gd.ollama, "Client", lambda **kw: FakeClient())  # noqa: ARG005
+    chunk = gd.Chunk(chunk_id="doc-chunk-0001", document="doc.pdf", text="Texto de prueba.")
+    cache: dict = {}
+    result1 = gd.get_chunk_embedding(chunk, "gemma4:e4b", cache)
+    result2 = gd.get_chunk_embedding(chunk, "gemma4:e4b", cache)
+    assert result1 == [0.1, 0.2, 0.3]
+    assert result1 == result2
+    assert call_count["n"] == 1  # computed only once
+
+
+def test_get_chunk_embedding_fallback_on_error(monkeypatch):
+    class BrokenClient:
+        def embeddings(self, **kw):  # noqa: ARG002
+            raise RuntimeError("Ollama unreachable")
+
+    monkeypatch.setattr(gd.ollama, "Client", lambda **kw: BrokenClient())  # noqa: ARG005
+    chunk = gd.Chunk(chunk_id="doc-chunk-0002", document="doc.pdf", text="Texto.")
+    result = gd.get_chunk_embedding(chunk, "gemma4:e4b", {})
+    assert result == []
+
+
+# --- build_topic_context with semantic mode ---------------------------
+
+def test_build_topic_context_semantic_falls_back_on_empty_embedding(monkeypatch):
+    monkeypatch.setattr("engine._topics.get_topic_embedding", lambda topic, model: [])
+    chunks = [
+        gd.Chunk(chunk_id="d-chunk-0001", document="d.pdf", text="Alpha beta gamma"),
+        gd.Chunk(chunk_id="d-chunk-0002", document="d.pdf", text="Delta epsilon zeta"),
+    ]
+    topic = gd.Topic(topic_id="t-00", name="Inexistente", summary="resumen", keywords=[])
+    ctx = gd.build_topic_context(chunks, topic, 50000, retrieval_mode="semantic")
+    assert ctx  # no error, returns something
+
+
+def test_build_topic_context_semantic_prefers_similar_chunk(monkeypatch):
+    def fake_topic_emb(topic, model):
+        return [1.0, 0.0]
+
+    def fake_chunk_emb(chunk, model, cache):
+        if "0001" in chunk.chunk_id:
+            return [1.0, 0.0]  # high cosine with topic
+        return [0.0, 1.0]  # low cosine with topic
+
+    monkeypatch.setattr("engine._topics.get_topic_embedding", fake_topic_emb)
+    monkeypatch.setattr("engine._ollama.get_chunk_embedding", fake_chunk_emb)
+    chunks = [
+        gd.Chunk(chunk_id="d-chunk-0001", document="d.pdf", text="Contenido relevante del tema"),
+        gd.Chunk(chunk_id="d-chunk-0002", document="d.pdf", text="Contenido irrelevante completamente"),
+    ]
+    topic = gd.Topic(topic_id="t-00", name="Tema de prueba", summary="resumen", keywords=[])
+    ctx = gd.build_topic_context(chunks, topic, 50000, retrieval_mode="semantic")
+    assert "Contenido relevante" in ctx
+
+
+# --- validate_args: mutual exclusion ----------------------------------
+
+def test_validate_args_rejects_mutually_exclusive_flags(tmp_path):
+    tf = tmp_path / "topics.txt"
+    qf = tmp_path / "qs.txt"
+    tf.write_text("Topic A\n")
+    qf.write_text("¿Pregunta?\n")
+    import argparse
+    args = argparse.Namespace(
+        chunk_overlap=350, chunk_size=3500, num_topics=8, questions_per_topic=6,
+        temperature=0.2, quality_gate="strict",
+        topics_file=tf, questions_file=qf,
+        retrieval="lexical", embedding_model="gemma4:e4b",
+    )
+    with pytest.raises(SystemExit):
+        gd.validate_args(args)
+
+
+def test_validate_args_rejects_missing_topics_file(tmp_path):
+    import argparse
+    args = argparse.Namespace(
+        chunk_overlap=350, chunk_size=3500, num_topics=8, questions_per_topic=6,
+        temperature=0.2, quality_gate="strict",
+        topics_file=tmp_path / "nonexistent.txt", questions_file=None,
+        retrieval="lexical", embedding_model="gemma4:e4b",
+    )
+    with pytest.raises(SystemExit):
+        gd.validate_args(args)
