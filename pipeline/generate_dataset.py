@@ -108,11 +108,13 @@ from engine._prompts import (  # noqa: F401
 from engine._quality import (  # noqa: F401
     _content_words,
     _question_bigrams,
+    audit_item_quality,
     apply_quality_gate,
     context_excerpt_for_fragment,
     deduplicate_items,
     find_verified_context_source,
     has_quality_artifact,
+    has_topic_mismatch,
     is_circular_answer,
     source_chunk_ids_for_fragment,
 )
@@ -125,10 +127,12 @@ from engine._text import (  # noqa: F401
     detect_document_language,
     extract_keywords,
     normalize_whitespace,
+    normalize_domain_terms,
     now_iso,
     parse_split,
     resolve_generation_language,
     sanitize_question,
+    strip_non_content_tail_sections,
     strip_accents_ascii,
     truncate_text,
 )
@@ -195,7 +199,7 @@ def main() -> None:
 
     if not args.skip_model_check:
         verify_ollama_model(args.model)
-        if getattr(args, "retrieval", "lexical") == "semantic":
+        if getattr(args, "retrieval", "lexical") in {"semantic", "hybrid"}:
             verify_ollama_model(args.embedding_model)
 
     args.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -486,6 +490,8 @@ def main() -> None:
             "quality_gate": args.quality_gate,
             "only_doc": args.only_doc,
             "resume": args.resume,
+            "retrieval": args.retrieval,
+            "embedding_model": args.embedding_model,
         },
         "runtime": build_reproducibility_info(),
     }
