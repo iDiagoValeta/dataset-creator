@@ -143,7 +143,7 @@ Output format (strict JSON object):
       "answer": "string",
       "type": "factual|conceptual|inference|compare|definition",
       "difficulty": "easy|medium|hard",
-      "context_source": "verbatim fragment from topic context that directly supports the answer (max 200 chars)"
+      "context_source": "verbatim fragment from topic context that directly supports the answer (max 350 chars)"
     }}
   ]
 }}
@@ -151,9 +151,11 @@ Output format (strict JSON object):
 Rules:
 - Questions must be answerable only from topic context.
 - Questions must cover different sub-points inside the same topic.
+- Use varied question openers; do not start more than two questions with the same first word.
 - Never repeat semantics from Existing dataset questions.
 - Answers must be argumentable: cite or paraphrase the specific passage that supports the answer.
 - Answers should be 2-4 sentences: state the claim, then explain the evidence from the text.
+- For compare or inference questions, context_source must include the full evidence needed for every claim in the answer.
 - If context lacks enough information for a question, skip that question - do not hallucinate.
 - Avoid asking about figures, images, or tables.
 - Do not hallucinate details not present in context.
@@ -238,7 +240,9 @@ Constraints:
 - No markdown.
 - No prose outside JSON.
 - Questions must be distinct.
+- Use varied question openers.
 - Prefer balanced types with at least one factual, conceptual and inference.
+- For compare or inference questions, include all supporting evidence in context_source.
 
 Document: {document}
 Topic: {topic.name}
@@ -272,7 +276,7 @@ Output format (strict JSON object):
       "answer": "string",
       "type": "factual|conceptual|inference|compare|definition",
       "difficulty": "easy|medium|hard",
-      "context_source": "verbatim fragment from context that directly supports the answer (max 200 chars)"
+      "context_source": "verbatim fragment from context that directly supports the answer (max 350 chars)"
     }}
   ]
 }}
