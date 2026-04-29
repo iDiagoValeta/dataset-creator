@@ -184,6 +184,29 @@ Topic context:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
+def _compact_topic_context(topic_context: str, max_chars: int) -> str:
+    """Keep several retrieved chunks visible in compact fallback prompts."""
+    if len(topic_context) <= max_chars:
+        return topic_context
+
+    marker_re = re.compile(r"(?=\[[^\]]+-chunk-\d{4}\])")
+    blocks = [block.strip() for block in marker_re.split(topic_context) if block.strip()]
+    if len(blocks) <= 1:
+        return truncate_text(topic_context, max_chars)
+
+    per_block_budget = max(800, max_chars // len(blocks))
+    selected: list[str] = []
+    total = 0
+    for block in blocks:
+        remaining = max_chars - total
+        if remaining < 500:
+            break
+        excerpt = truncate_text(block, min(per_block_budget, remaining))
+        selected.append(excerpt)
+        total += len(excerpt) + 2
+    return "\n\n".join(selected)
+
+
 def build_topic_generation_messages_compact(
     document: str,
     topic: Topic,
@@ -220,7 +243,7 @@ Constraints:
 Document: {document}
 Topic: {topic.name}
 Context:
-{truncate_text(topic_context, 7000)}
+{_compact_topic_context(topic_context, 7000)}
 """.strip()
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
