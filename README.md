@@ -14,16 +14,16 @@ The `examples/` folder contains a complete generation run on a research paper ab
 
 ```
 examples/
-  2412.15448v2.pdf       — source document (25 chunks)
-  dataset.jsonl          — 12 QA items, all context-verified
-  dataset_train.jsonl    —  9 items (train split)
-  dataset_val.jsonl      —  1 item  (val split)
-  dataset_test.jsonl     —  2 items (test split)
-  dataset.meta.json      — run metadata and quality stats
-  dataset.rejected.jsonl — 6 items rejected by the quality gate
+  2412.15448v2.pdf       — source document (8 chunks in this run)
+  dataset.jsonl          — 21 QA items, all context-verified
+  dataset_train.jsonl    — 16 items (train split)
+  dataset_val.jsonl      —  2 items (val split)
+  dataset_test.jsonl     —  3 items (test split)
+  dataset.meta.json      — run metadata, quality stats, and audit stats
+  dataset.rejected.jsonl — 11 items rejected by the quality gate
 ```
 
-Generated with `gemma4:e4b`, strict quality gate, language auto-detected as English, `--retrieval semantic` (fell back to lexical — model does not expose an embeddings endpoint). The 6 rejected items came from a chunk containing a PDF picture placeholder (`== picture x intentionally omitted ==`), correctly caught by the artifact filter. See `dataset.meta.json` for the full parameter set.
+Generated with `gemma4:e4b`, strict quality gate, language auto-detected as English, and default `--retrieval hybrid` using `embeddinggemma:latest`. The run produced 42 raw items, 21 accepted items after quality filtering and deduplication, 11 rejected rows, 7 accepted topics, and no audit warnings. See `dataset.meta.json` for the full parameter set.
 
 ## How it works
 
@@ -39,27 +39,30 @@ The extracted text is scanned for language-marker words (English, Spanish, Catal
 The model receives a wide context window (up to `max_doc_context_chars` characters) and is asked to return a JSON list of topics with name, summary, and keywords. If the model output is not parseable, a compact retry is attempted. If topics are still too generic or garbage, the pipeline falls back to section headings extracted directly from the text. Topics are distributed uniformly across the document so that results, discussion, and conclusions sections are covered, not just the introduction.
 
 **4. Generate QA pairs per topic**  
-For each topic, the pipeline selects the most relevant chunks (lexical scoring by default; embedding-based cosine similarity with `--retrieval semantic`) and sends them to the model with a generation prompt in the detected language. The model returns up to `questions_per_topic` JSON items, each with `question`, `answer`, `type`, `difficulty`, and `context_source`.
+For each topic, the pipeline selects the most relevant chunks (`hybrid` retrieval by default, combining lexical scoring and embedding-based cosine similarity) and sends them to the model with a generation prompt in the detected language. The model returns up to `questions_per_topic` JSON items, each with `question`, `answer`, `type`, `difficulty`, and `context_source`.
 
 **5. Verify context source**  
 Each item's `context_source` is checked against the topic context by substring match. If the model's suggested source is not found verbatim, the pipeline searches the context for the answer words and returns the best matching fragment. The result is stored as `context_source_verified: true/false`.
 
 **6. Apply the quality gate**  
 Before deduplication, the quality gate filters items:
-- `strict` (default): rejects items with unverified `context_source`, circular answers (answer adds no new information over the question), and PDF extraction artifacts.
-- `balanced`: applies the circular-answer and artifact checks but keeps unverified items.
+- `strict` (default): rejects items with unverified `context_source`, circular answers (answer adds no new information over the question), PDF extraction artifacts, first-person paper voice, truncated source fragments, clear topic mismatches, and weakly supported compare/inference answers.
+- `balanced`: applies deterministic quality checks and circular-answer filtering, but keeps unverified context sources.
 - `off`: no filtering.  
 
 Rejected items are written to `dataset.rejected.jsonl` with a `rejection_reason` field.
 
-**7. Deduplicate**  
+**7. Backfill low-coverage topics**  
+If a discovered topic has too few accepted items, the pipeline makes a deterministic second generation pass for that topic before final deduplication.
+
+**8. Deduplicate**  
 Exact duplicates and near-duplicates (bigram overlap on questions and answers) are removed from the accepted set.
 
-**8. Split and export**  
-The deduplicated items are shuffled deterministically (using `seed`) and split into train/val/test according to `--split`. Each split is written to its own JSONL file plus the combined `dataset.jsonl`.
+**9. Split and export**  
+The deduplicated items are shuffled deterministically (using `seed`) and split into train/val/test according to `--split`. When rows contain `topic_id`, the splitter keeps small validation/test splits more topic-aware. Each split is written to its own JSONL file plus the combined `dataset.jsonl`.
 
-**9. Write metadata**  
-`dataset.meta.json` records all counts, quality stats, parameters, detected languages, and runtime information for reproducibility.
+**10. Write metadata**  
+`dataset.meta.json` records all counts, quality stats, audit stats, parameters, detected languages, and runtime information for reproducibility.
 
 ## Structure
 
@@ -162,8 +165,8 @@ Processes all PDFs in `pipeline/input/` with default settings.
 | `--seed N` | `42` | Random seed for reproducibility |
 | `--language CODE` | `auto` | Output language (`auto`, `es`, `en`, `ca`, …) |
 | `--quality-gate MODE` | `strict` | Quality filter mode (`strict`, `balanced`, `off`) |
-| `--retrieval MODE` | `lexical` | Chunk selection method: `lexical` (default) or `semantic` (embedding cosine similarity) |
-| `--embedding-model MODEL` | same as `--model` | Ollama model used for embeddings when `--retrieval semantic` |
+| `--retrieval MODE` | `hybrid` | Chunk selection method: `lexical`, `semantic`, or `hybrid` |
+| `--embedding-model MODEL` | `embeddinggemma:latest` | Ollama model used for embeddings when `--retrieval semantic` or `--retrieval hybrid` |
 | `--topics-file PATH` | — | YAML or plain-text file with user-defined topics. Skips automatic topic mapping. |
 | `--questions-file PATH` | — | Plain-text file with one seed question per line. Generates answers for each question. Mutually exclusive with `--topics-file`. |
 | `--only-doc NAMES` | — | Process only these PDFs (comma-separated filename or stem) |
@@ -220,11 +223,15 @@ python pipeline/generate_dataset.py --temperature 0.0 --skip-model-check
 
 | Mode | What it keeps |
 |---|---|
-| `strict` | Only items with verified `context_source`, non-circular answers, and no extraction artifacts. This is the default. |
-| `balanced` | Keeps unverified items but still removes circular answers and extraction artifacts. |
+| `strict` | Only items with verified `context_source`, non-circular answers, clean extraction text, topic alignment, and enough source support. This is the default. |
+| `balanced` | Keeps unverified context sources but still removes deterministic quality failures and circular answers. |
 | `off` | Passes everything through. |
 
-Rejected items are always written to `dataset.rejected.jsonl` with a `rejection_reason` field (`unverified_context_source`, `circular_answer`, `artifact_or_reference_noise`).
+Rejected items are always written to `dataset.rejected.jsonl` with a `rejection_reason` field such as `unverified_context_source`, `circular_answer`, `artifact_or_reference_noise`, `truncated_context_source`, `first_person_answer`, `topic_mismatch`, or `insufficient_context_support`.
+
+### Dataset audit
+
+After quality filtering, backfill, and deduplication, `dataset.meta.json` includes an `audit` block with accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, topics below the minimum coverage threshold, and audit warnings. This makes small or uneven datasets easier to spot before training.
 
 ### Language detection
 
@@ -242,19 +249,19 @@ python pipeline/generate_dataset.py --language pt   # Portuguese
 
 Every processed document writes its items to `pipeline/run_logs/<stem>.items.jsonl`. If a run is interrupted, restart with `--resume` and the pipeline will skip any document that already has a checkpoint, reloading its items from disk instead of calling the model again.
 
-### Semantic chunk retrieval
+### Chunk retrieval
 
-By default the pipeline selects the most relevant chunks for each topic using a simple lexical score (substring matching). Pass `--retrieval semantic` to use embedding-based cosine similarity instead — useful when the topic vocabulary differs from the text vocabulary (synonyms, domain jargon, multilingual documents).
+By default the pipeline uses `--retrieval hybrid`, combining lexical topic scoring with embedding-based cosine similarity. Use `lexical` for a faster no-embedding run, or `semantic` when you only want embedding similarity.
 
 ```bash
-# Pull an embedding model first (any Ollama model works; the default is the same as --model)
-ollama pull gemma4:e4b
+# Pull the default embedding model first
+ollama pull embeddinggemma:latest
 
-# Enable semantic retrieval
-python pipeline/generate_dataset.py --retrieval semantic
+# Force lexical retrieval
+python pipeline/generate_dataset.py --retrieval lexical
 
 # Use a different model for embeddings
-python pipeline/generate_dataset.py --retrieval semantic --embedding-model nomic-embed-text
+python pipeline/generate_dataset.py --retrieval hybrid --embedding-model nomic-embed-text
 ```
 
 Chunk embeddings are cached in memory across topics within the same document, so each chunk is embedded only once per run. The lexical fast-path (exact topic-name match in chunk text) is always attempted first regardless of retrieval mode.
@@ -318,8 +325,8 @@ All flags have environment variable equivalents. Variables take effect when the 
 | `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout in seconds |
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
-| `OLLAMA_EMBEDDING_MODEL` | same as `OLLAMA_DATASET_MODEL` | Ollama model for semantic embeddings (`--retrieval semantic`) |
-| `DATASET_RETRIEVAL` | `lexical` | Chunk retrieval mode (`lexical` or `semantic`) |
+| `OLLAMA_EMBEDDING_MODEL` | `embeddinggemma:latest` | Ollama model for semantic/hybrid embeddings |
+| `DATASET_RETRIEVAL` | `hybrid` | Chunk retrieval mode (`lexical`, `semantic`, or `hybrid`) |
 | `DATASET_LANGUAGE` | `auto` | Language code or `auto` |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size in characters |
 | `DATASET_CHUNK_OVERLAP` | `350` | Overlap between chunks |
@@ -341,7 +348,7 @@ All flags have environment variable equivalents. Variables take effect when the 
 | `dataset_train.jsonl` | Train split |
 | `dataset_val.jsonl` | Validation split |
 | `dataset_test.jsonl` | Test split |
-| `dataset.meta.json` | Run metadata, quality stats, parameters, runtime |
+| `dataset.meta.json` | Run metadata, quality stats, audit stats, parameters, runtime |
 | `dataset.rejected.jsonl` | Items filtered by the quality gate |
 | `run_logs/<stem>.json` | Raw model outputs per document and topic |
 | `run_logs/<stem>.items.jsonl` | Per-document checkpoint (used by `--resume`) |
