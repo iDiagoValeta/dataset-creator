@@ -28,6 +28,15 @@ def test_parse_split_rejects_negative_component():
         gd.parse_split("0.8,-0.1,0.3")
 
 
+# --- defaults ---------------------------------------------------------
+
+def test_cli_defaults_use_hybrid_embeddinggemma_and_gemma4_e4b():
+    args = gd.build_arg_parser().parse_args([])
+    assert args.model == "gemma4:e4b"
+    assert args.embedding_model == "embeddinggemma:latest"
+    assert args.retrieval == "hybrid"
+
+
 # --- chunk_text -------------------------------------------------------
 
 def test_chunk_text_produces_overlapping_chunks():
@@ -59,6 +68,21 @@ def test_clean_markdown_artifacts_removes_picture_and_ref_noise():
     assert "picture" not in cleaned
     assert "80 computer" not in cleaned
     assert "OS/360" in cleaned
+
+
+def test_clean_markdown_artifacts_normalizes_domain_terms_and_strips_tail_sections():
+    text = (
+        "The highfrequency setting rewards riskadjusted metrics.\n\n"
+        "Conclusion\nUseful final content.\n\n"
+        "Code Availability\nThe implementation code is available online.\n\n"
+        "References\nA. Author."
+    )
+    cleaned = gd.clean_markdown_artifacts(text)
+    assert "high-frequency" in cleaned
+    assert "risk-adjusted" in cleaned
+    assert "Useful final content" in cleaned
+    assert "Code Availability" not in cleaned
+    assert "References" not in cleaned
 
 
 def test_clean_generated_text_capitalizes_and_removes_numeric_artifact():
@@ -204,6 +228,20 @@ def test_deduplicate_items_drops_duplicate_answers():
     items = [
         {"question": "What is an OS?", "answer": "An OS manages hardware resources."},
         {"question": "How can an operating system be described?", "answer": "An OS manages hardware resources."},
+    ]
+    assert len(gd.deduplicate_items(items)) == 1
+
+
+def test_deduplicate_items_drops_cross_topic_semantic_duplicates():
+    items = [
+        {
+            "question": "What does the Efficient Market Hypothesis suggest about asset prices?",
+            "answer": "Asset prices fully incorporate all available information.",
+        },
+        {
+            "question": "What does the Efficient Market Hypothesis suggest about stock prices?",
+            "answer": "Stock prices fully reflect all available information.",
+        },
     ]
     assert len(gd.deduplicate_items(items)) == 1
 
@@ -457,6 +495,95 @@ def test_apply_quality_gate_strict_rejects_unverified_and_artifacts():
     assert stats["verified_ratio"] == 1.0
 
 
+def test_apply_quality_gate_rejects_generation_and_reference_noise():
+    items = [
+        {
+            "id": "cut-off",
+            "context_source_verified": True,
+            "answer": "The text cuts off before the full evidence is shown.",
+            "topic": "Results",
+        },
+        {
+            "id": "joined-word",
+            "context_source_verified": True,
+            "answer": "The model improves riskadjusted performance.",
+            "topic": "Results",
+        },
+        {
+            "id": "references-noise",
+            "context_source_verified": True,
+            "answer": "The paper uses the Rachev ratio.",
+            "context_excerpt": "The paper uses the Rachev ratio. References Abrol et al.",
+            "topic": "Results",
+        },
+    ]
+    accepted, rejected, stats = gd.apply_quality_gate(items, "strict")
+    assert accepted == []
+    assert {item["id"] for item in rejected} == {"cut-off", "joined-word", "references-noise"}
+    assert stats["rejection_reasons"] == {"artifact_or_reference_noise": 3}
+
+
+def test_apply_quality_gate_rejects_topic_mismatch():
+    item = {
+        "id": "wrong-topic",
+        "question": "What deep learning architectures should future studies explore?",
+        "answer": "Future studies should explore LSTM networks and Transformer-based architectures.",
+        "context_source": "Future studies should explore models such as Long Short-Term Memory (LSTM) networks and Transformer-based architectures.",
+        "context_source_verified": True,
+        "topic": "Technical Analysis and Market Prediction",
+        "topic_keywords": ["Technical Analysis", "Market Prediction", "Financial Forecasting", "Technical Indicators"],
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "topic_mismatch"
+    assert stats["rejection_reasons"] == {"topic_mismatch": 1}
+
+
+def test_apply_quality_gate_keeps_related_cross_domain_hft_item():
+    item = {
+        "id": "related-topic",
+        "question": "What did the findings suggest about traditional technical indicators in high-frequency markets?",
+        "answer": "They may have diminishing predictive value in modern high-frequency markets.",
+        "context_source": "These findings suggest that traditional technical indicators may have diminishing predictive value in modern high-frequency markets.",
+        "context_source_verified": True,
+        "topic": "High-Frequency Trading and Market Microstructure",
+        "topic_keywords": ["High-Frequency Trading", "Market Microstructure", "Order Flow", "Latency"],
+    }
+    accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
+    assert accepted == [item]
+    assert rejected == []
+
+
+def test_apply_quality_gate_rejects_truncated_context_source():
+    item = {
+        "id": "truncated",
+        "question": "What does EMH suggest about asset prices?",
+        "answer": "The EMH suggests that asset prices incorporate all available information.",
+        "context_source": "icient Market Hypothesis (EMH) suggests that asset prices fully incorporate all available information.",
+        "context_source_verified": True,
+        "topic": "Technical Analysis and Market Prediction",
+        "topic_keywords": ["Technical Analysis", "Market Prediction", "Financial Forecasting", "Technical Indicators"],
+    }
+    accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "truncated_context_source"
+
+
+def test_apply_quality_gate_rejects_first_person_answer():
+    item = {
+        "id": "first-person",
+        "question": "What do the findings support?",
+        "answer": "Our findings provide empirical support for the semi-strong form of the EMH.",
+        "context_source": "The findings provide empirical support for the semi-strong form of the EMH.",
+        "context_source_verified": True,
+        "topic": "High-Frequency Trading and Market Microstructure",
+        "topic_keywords": ["High-Frequency Trading", "Market Microstructure", "Order Flow", "Latency"],
+    }
+    accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "first_person_answer"
+
+
 # --- cosine_similarity ------------------------------------------------
 
 def test_cosine_similarity_identical_vectors():
@@ -606,6 +733,35 @@ def test_build_topic_context_semantic_prefers_similar_chunk(monkeypatch):
     assert "Contenido relevante" in ctx
 
 
+def test_build_topic_context_hybrid_combines_lexical_and_semantic(monkeypatch):
+    monkeypatch.setattr("engine._topics.get_topic_embedding", lambda topic, model: [1.0, 0.0])
+
+    def fake_chunk_emb(chunk, model, cache):
+        if "0002" in chunk.chunk_id:
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+    monkeypatch.setattr("engine._ollama.get_chunk_embedding", fake_chunk_emb)
+    chunks = [
+        gd.Chunk(chunk_id="d-chunk-0001", document="d.pdf", text="rarelex token appears here."),
+        gd.Chunk(chunk_id="d-chunk-0002", document="d.pdf", text="Semantically closest passage."),
+    ]
+    topic = gd.Topic(topic_id="t-00", name="Missing topic", summary="resumen", keywords=["rarelex"])
+    ctx = gd.build_topic_context(chunks, topic, 50000, retrieval_mode="hybrid")
+    assert ctx.index("d-chunk-0002") < ctx.index("d-chunk-0001")
+
+
+def test_build_topic_context_hybrid_falls_back_to_lexical_on_empty_embedding(monkeypatch):
+    monkeypatch.setattr("engine._topics.get_topic_embedding", lambda topic, model: [])
+    chunks = [
+        gd.Chunk(chunk_id="d-chunk-0001", document="d.pdf", text="unrelated text"),
+        gd.Chunk(chunk_id="d-chunk-0002", document="d.pdf", text="rarelex token appears here."),
+    ]
+    topic = gd.Topic(topic_id="t-00", name="Missing topic", summary="resumen", keywords=["rarelex"])
+    ctx = gd.build_topic_context(chunks, topic, 50000, retrieval_mode="hybrid")
+    assert ctx.startswith("[d-chunk-0002]")
+
+
 # --- validate_args: mutual exclusion ----------------------------------
 
 def test_validate_args_rejects_mutually_exclusive_flags(tmp_path):
@@ -631,6 +787,18 @@ def test_validate_args_rejects_missing_topics_file(tmp_path):
         temperature=0.2, quality_gate="strict",
         topics_file=tmp_path / "nonexistent.txt", questions_file=None,
         retrieval="lexical", embedding_model="gemma4:e4b",
+    )
+    with pytest.raises(SystemExit):
+        gd.validate_args(args)
+
+
+def test_validate_args_rejects_empty_embedding_model_for_hybrid(tmp_path):
+    import argparse
+    args = argparse.Namespace(
+        chunk_overlap=350, chunk_size=3500, num_topics=8, questions_per_topic=6,
+        temperature=0.2, quality_gate="strict",
+        topics_file=None, questions_file=None,
+        retrieval="hybrid", embedding_model="",
     )
     with pytest.raises(SystemExit):
         gd.validate_args(args)
