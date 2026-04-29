@@ -74,6 +74,7 @@ from engine._export import (  # noqa: F401
     _current_git_commit,
     _package_version,
     _remove_empty_dirs,
+    build_dataset_audit,
     build_reproducibility_info,
     clean_generated_artifacts,
     split_rows,
@@ -108,11 +109,13 @@ from engine._prompts import (  # noqa: F401
 from engine._quality import (  # noqa: F401
     _content_words,
     _question_bigrams,
-    audit_item_quality,
     apply_quality_gate,
+    audit_item_quality,
+    clean_context_artifacts,
     context_excerpt_for_fragment,
     deduplicate_items,
     find_verified_context_source,
+    has_insufficient_context_support,
     has_quality_artifact,
     has_topic_mismatch,
     is_circular_answer,
@@ -126,14 +129,14 @@ from engine._text import (  # noqa: F401
     deduplicate_preserve_order,
     detect_document_language,
     extract_keywords,
-    normalize_whitespace,
     normalize_domain_terms,
+    normalize_whitespace,
     now_iso,
     parse_split,
     resolve_generation_language,
     sanitize_question,
-    strip_non_content_tail_sections,
     strip_accents_ascii,
+    strip_non_content_tail_sections,
     truncate_text,
 )
 from engine._topics import (  # noqa: F401
@@ -205,6 +208,7 @@ def main() -> None:
     args.debug_dir.mkdir(parents=True, exist_ok=True)
 
     generated: list[dict[str, Any]] = []
+    topic_generation_records: list[dict[str, Any]] = []
     total_chunks = 0
     total_topics = 0
     resumed_docs = 0
@@ -427,6 +431,16 @@ def main() -> None:
             generated.extend(topic_items)
             doc_items.extend(topic_items)
             existing_questions.extend(item["question"] for item in topic_items)
+            topic_generation_records.append(
+                {
+                    "document": pdf_path.name,
+                    "pdf_path": pdf_path,
+                    "topic": topic,
+                    "topic_context": topic_context,
+                    "language": generation_language,
+                    "document_language": document_language,
+                }
+            )
             print(f" -> {len(topic_items)} items ({topic_elapsed:.1f}s)")
             doc_debug["topics"].append(
                 {
@@ -444,6 +458,61 @@ def main() -> None:
         save_checkpoint_items(args.debug_dir, pdf_path, doc_items)
 
     quality_candidates, rejected_rows, quality_stats = apply_quality_gate(generated, args.quality_gate)
+    if not seed_question_mode_active and topic_generation_records:
+        min_items_per_topic = 2
+        accepted_by_topic: dict[str, int] = {}
+        for item in quality_candidates:
+            topic_id = str(item.get("topic_id", ""))
+            accepted_by_topic[topic_id] = accepted_by_topic.get(topic_id, 0) + 1
+
+        backfill_items: list[dict[str, Any]] = []
+        for record_idx, record in enumerate(topic_generation_records):
+            topic = record["topic"]
+            accepted_count = accepted_by_topic.get(topic.topic_id, 0)
+            if accepted_count >= min_items_per_topic:
+                continue
+            needed = min(args.questions_per_topic, min_items_per_topic - accepted_count + 2)
+            existing_questions = [
+                str(item.get("question", ""))
+                for item in generated + backfill_items
+                if item.get("document") == record["document"]
+            ]
+            print(
+                f"[BACKFILL] {record['document']} / {topic.name[:60]}: "
+                f"{accepted_count} aceptados; generando {needed}."
+            )
+            extra_items, _ = generate_items_for_topic(
+                model=args.model,
+                document=record["document"],
+                topic=topic,
+                topic_context=record["topic_context"],
+                language=record["language"],
+                questions_per_topic=needed,
+                temperature=args.temperature,
+                existing_questions=existing_questions,
+                seed=args.seed + 1000 + record_idx,
+                document_language=record["document_language"],
+                id_offset=args.questions_per_topic,
+            )
+            backfill_items.extend(extra_items)
+
+        quality_stats["backfill_generated_items"] = len(backfill_items)
+        if backfill_items:
+            generated.extend(backfill_items)
+            affected_pdf_paths = {
+                record["pdf_path"]
+                for record in topic_generation_records
+                if any(item.get("document") == record["document"] for item in backfill_items)
+            }
+            for affected_pdf_path in affected_pdf_paths:
+                save_checkpoint_items(
+                    args.debug_dir,
+                    affected_pdf_path,
+                    [item for item in generated if item.get("document") == affected_pdf_path.name],
+                )
+            quality_candidates, rejected_rows, quality_stats = apply_quality_gate(generated, args.quality_gate)
+            quality_stats["backfill_generated_items"] = len(backfill_items)
+
     deduped = deduplicate_items(quality_candidates)
     quality_stats["accepted_items_before_dedup"] = len(quality_candidates)
     quality_stats["verified_items_before_dedup"] = quality_stats["verified_items"]
@@ -451,6 +520,15 @@ def main() -> None:
     quality_stats["accepted_items"] = len(deduped)
     quality_stats["verified_items"] = sum(1 for item in deduped if item.get("context_source_verified"))
     train_rows, val_rows, test_rows = split_rows(deduped, split=split, seed=args.seed)
+    expected_topic_ids = [str(record["topic"].topic_id) for record in topic_generation_records]
+    dataset_audit = build_dataset_audit(
+        deduped,
+        rejected_rows,
+        train_rows,
+        val_rows,
+        test_rows,
+        expected_topic_ids=expected_topic_ids,
+    )
 
     write_jsonl(args.output, deduped)
     output_base = args.output.with_suffix("")
@@ -476,6 +554,7 @@ def main() -> None:
         "rejected_items": len(rejected_rows),
         "context_source_verified_items": verified_count,
         "quality": quality_stats,
+        "audit": dataset_audit,
         "resumed_documents": resumed_docs,
         "split": {"train": len(train_rows), "val": len(val_rows), "test": len(test_rows)},
         "params": {
@@ -512,6 +591,8 @@ def main() -> None:
     print(f"- Rechazados: {Path(f'{output_base}.rejected.jsonl')}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
     print(f"- context_source verificado (substring literal): {verified_count}/{len(deduped)}")
+    if dataset_audit["warnings"]:
+        print(f"- Avisos de auditoria: {len(dataset_audit['warnings'])}")
     if args.resume:
         print(f"- Documentos reanudados desde checkpoint: {resumed_docs}")
     print(f"- Metadata: {args.output.with_suffix('.meta.json')}")
