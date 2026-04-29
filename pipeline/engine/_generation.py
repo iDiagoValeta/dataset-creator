@@ -62,6 +62,7 @@ def generate_items_for_topic(
     seed: int | None = None,
     document_language: str | None = None,
     seed_question_mode: bool = False,
+    id_offset: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Generate normalized Q/A items for one topic."""
     debug_attempts: list[dict[str, Any]] = []
@@ -110,7 +111,7 @@ def generate_items_for_topic(
 
             normalized_local.append(
                 {
-                    "id": f"{document}-{topic.topic_id}-qa-{idx:02d}",
+                    "id": f"{document}-{topic.topic_id}-qa-{idx + id_offset:02d}",
                     "question": question,
                     "answer": answer,
                     "type": item_type,
