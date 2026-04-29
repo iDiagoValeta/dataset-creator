@@ -92,6 +92,13 @@ def test_clean_generated_text_capitalizes_and_removes_numeric_artifact():
     assert "Ã¢" not in cleaned
 
 
+def test_clean_generated_text_removes_html_breaks_and_rejoins_words():
+    cleaned = gd.clean_generated_text("sortino focuses on down-<br side risk and <b>losses</b>.")
+    assert "<br" not in cleaned
+    assert "<b>" not in cleaned
+    assert "downside risk" in cleaned.lower()
+
+
 # --- try_parse_json_payload -------------------------------------------
 
 def test_try_parse_json_payload_clean_object():
@@ -419,6 +426,18 @@ def test_find_verified_context_source_truncates_on_word_boundary():
     assert source.split()[-1] == "alpha"
 
 
+def test_find_verified_context_source_cleans_html_breaks_from_source():
+    context = "[doc-chunk-0001] Sortino ratio improves on Sharpe by focusing only on downside risk."
+    source, verified = gd.find_verified_context_source(
+        "Sortino ratio improves on Sharpe by focusing only on down-<br side risk.",
+        "It focuses only on downside risk.",
+        context,
+    )
+    assert verified is True
+    assert "<br" not in source
+    assert "downside risk" in source
+
+
 def test_sample_existing_questions_respects_limit():
     qs = [f"q{i}" for i in range(100)]
     sampled = gd._sample_existing_questions(qs, limit=20)
@@ -523,6 +542,36 @@ def test_apply_quality_gate_rejects_generation_and_reference_noise():
     assert stats["rejection_reasons"] == {"artifact_or_reference_noise": 3}
 
 
+def test_apply_quality_gate_rejects_html_formula_noise():
+    item = {
+        "id": "html-noise",
+        "context_source_verified": True,
+        "answer": "The Sortino ratio focuses on downside risk.",
+        "context_source": "Sortino ratio E Rp-Rf <br sd <br downside risk.",
+        "topic": "Risk metrics",
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "artifact_or_reference_noise"
+    assert stats["rejection_reasons"] == {"artifact_or_reference_noise": 1}
+
+
+def test_apply_quality_gate_rejects_compare_with_unsupported_answer_detail():
+    item = {
+        "id": "unsupported-compare",
+        "question": "How do A and B differ?",
+        "answer": "A reduces risk by using adaptive features, while B increases returns through raw prices.",
+        "context_source": "A reduces risk by using adaptive features.",
+        "context_source_verified": True,
+        "type": "compare",
+        "topic": "Model comparison",
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "insufficient_context_support"
+    assert stats["rejection_reasons"] == {"insufficient_context_support": 1}
+
+
 def test_apply_quality_gate_rejects_topic_mismatch():
     item = {
         "id": "wrong-topic",
@@ -537,6 +586,21 @@ def test_apply_quality_gate_rejects_topic_mismatch():
     assert accepted == []
     assert rejected[0]["rejection_reason"] == "topic_mismatch"
     assert stats["rejection_reasons"] == {"topic_mismatch": 1}
+
+
+def test_apply_quality_gate_keeps_shared_domain_feature_importance_item():
+    item = {
+        "id": "shared-domain",
+        "question": "What feature importance split did the Random Forest analysis find?",
+        "answer": "Primary price-based features accounted for over 60% while technical indicators accounted for 14% to 15%.",
+        "context_source": "A feature importance analysis demonstrates that primary price-based features dominate the predictions made by the model, accounting for over 60% of the importance, while established technical indicators account for only 14% to 15%.",
+        "context_source_verified": True,
+        "topic": "Random Forest Models in High-Frequency Trading",
+        "topic_keywords": ["Random Forest Regression", "High-Frequency Trading", "Stock Price Prediction"],
+    }
+    accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
+    assert accepted == [item]
+    assert rejected == []
 
 
 def test_apply_quality_gate_keeps_related_cross_domain_hft_item():
@@ -582,6 +646,39 @@ def test_apply_quality_gate_rejects_first_person_answer():
     accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
     assert accepted == []
     assert rejected[0]["rejection_reason"] == "first_person_answer"
+
+
+# --- split/audit ------------------------------------------------------
+
+def test_split_rows_spreads_small_splits_across_topics():
+    rows = (
+        [{"id": f"a{i}", "topic_id": "topic-a"} for i in range(5)]
+        + [{"id": f"b{i}", "topic_id": "topic-b"} for i in range(4)]
+        + [{"id": f"c{i}", "topic_id": "topic-c"} for i in range(3)]
+    )
+    train, val, test = gd.split_rows(rows, split=(0.7, 0.15, 0.15), seed=42)
+    assert len(train) == 8
+    assert len(val) == 1
+    assert len(test) == 3
+    assert len({row["topic_id"] for row in test}) == 3
+
+
+def test_build_dataset_audit_reports_topic_and_split_warnings():
+    accepted = [{"topic_id": "topic-a"}, {"topic_id": "topic-a"}, {"topic_id": "topic-b"}]
+    rejected = [{"topic_id": "topic-c", "rejection_reason": "artifact_or_reference_noise"}]
+    audit = gd.build_dataset_audit(
+        accepted,
+        rejected,
+        train_rows=accepted,
+        val_rows=[{"topic_id": "topic-a"}],
+        test_rows=[],
+        expected_topic_ids=["topic-a", "topic-b", "topic-c"],
+    )
+    assert audit["accepted_by_topic"] == {"topic-a": 2, "topic-b": 1}
+    assert audit["rejected_by_topic"] == {"topic-c": 1}
+    assert audit["topics_without_accepted"] == ["topic-c"]
+    assert "topic-b" in audit["low_accepted_topics"]
+    assert "val_split_has_single_topic" in audit["warnings"]
 
 
 # --- cosine_similarity ------------------------------------------------
