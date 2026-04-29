@@ -20,6 +20,36 @@ from engine._quality import (
 from engine._text import clean_generated_text, normalize_whitespace, now_iso
 
 
+def _normalize_paper_voice(answer: str) -> str:
+    """Avoid first-person paper phrasing in dataset answers."""
+    possessive_replacements = {
+        "Our findings ": "The paper's findings ",
+        "Our results ": "The paper's results ",
+        "Our study ": "The study ",
+        "Our paper ": "The paper ",
+    }
+    for prefix, replacement in possessive_replacements.items():
+        if answer.startswith(prefix):
+            return f"{replacement}{answer[len(prefix):]}"
+
+    replacements = {
+        "assess": "assesses",
+        "analyze": "analyzes",
+        "analyse": "analyses",
+        "evaluate": "evaluates",
+        "examine": "examines",
+        "find": "finds",
+        "show": "shows",
+        "propose": "proposes",
+        "present": "presents",
+    }
+    for verb, replacement in replacements.items():
+        prefix = f"We {verb} "
+        if answer.startswith(prefix):
+            return f"The paper {replacement} {answer[len(prefix):]}"
+    return answer
+
+
 def generate_items_for_topic(
     model: str,
     document: str,
@@ -60,7 +90,7 @@ def generate_items_for_topic(
             if not isinstance(item, dict):
                 continue
             question = clean_generated_text(str(item.get("question", "")).strip())
-            answer = clean_generated_text(str(item.get("answer", "")).strip())
+            answer = _normalize_paper_voice(clean_generated_text(str(item.get("answer", "")).strip()))
             if not question or not answer:
                 continue
             raw_type = str(item.get("type", "factual")).strip().lower()
