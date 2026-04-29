@@ -1,35 +1,83 @@
 {
-  "created_at": "2026-04-29T10:10:14.558862+00:00",
+  "created_at": "2026-04-29T19:08:06.820197+00:00",
   "model": "gemma4:e4b",
   "language": "auto",
   "document_languages": {
     "2412.15448v2.pdf": "en"
   },
-  "source_dir": "examples",
-  "output": "examples\\dataset.jsonl",
+  "source_dir": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\input",
+  "output": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\output\\dataset.jsonl",
   "pdf_count": 1,
-  "chunk_count": 25,
-  "topic_count": 3,
-  "generated_items": 18,
-  "deduplicated_items": 18,
-  "accepted_items": 18,
-  "rejected_items": 0,
-  "context_source_verified_items": 18,
+  "chunk_count": 8,
+  "topic_count": 7,
+  "generated_items": 42,
+  "deduplicated_items": 21,
+  "accepted_items": 21,
+  "rejected_items": 11,
+  "context_source_verified_items": 21,
   "quality": {
     "gate": "strict",
-    "accepted_items": 18,
-    "rejected_items": 0,
-    "verified_items": 18,
+    "accepted_items": 21,
+    "rejected_items": 11,
+    "verified_items": 21,
     "verified_ratio": 1.0,
-    "rejection_reasons": {},
-    "accepted_items_before_dedup": 18,
-    "verified_items_before_dedup": 18,
-    "duplicate_items_removed_after_quality": 0
+    "rejection_reasons": {
+      "topic_mismatch": 4,
+      "truncated_context_source": 5,
+      "first_person_answer": 1,
+      "insufficient_context_support": 1
+    },
+    "backfill_generated_items": 0,
+    "accepted_items_before_dedup": 31,
+    "verified_items_before_dedup": 31,
+    "duplicate_items_removed_after_quality": 10
+  },
+  "audit": {
+    "accepted_by_topic": {
+      "topic-00": 5,
+      "topic-01": 4,
+      "topic-02": 3,
+      "topic-03": 2,
+      "topic-04": 2,
+      "topic-05": 2,
+      "topic-06": 3
+    },
+    "rejected_by_topic": {
+      "topic-00": 1,
+      "topic-01": 2,
+      "topic-02": 1,
+      "topic-03": 3,
+      "topic-04": 3,
+      "topic-06": 1
+    },
+    "split_by_topic": {
+      "train": {
+        "topic-06": 3,
+        "topic-03": 2,
+        "topic-05": 2,
+        "topic-04": 2,
+        "topic-01": 2,
+        "topic-02": 2,
+        "topic-00": 3
+      },
+      "val": {
+        "topic-01": 1,
+        "topic-00": 1
+      },
+      "test": {
+        "topic-02": 1,
+        "topic-00": 1,
+        "topic-01": 1
+      }
+    },
+    "topics_without_accepted": [],
+    "low_accepted_topics": [],
+    "warnings": []
   },
   "resumed_documents": 0,
   "split": {
-    "train": 14,
-    "val": 1,
+    "train": 16,
+    "val": 2,
     "test": 3
   },
   "params": {
@@ -42,8 +90,10 @@
     "max_doc_context_chars": 110000,
     "max_topic_context_chars": 24000,
     "quality_gate": "strict",
-    "only_doc": "2412.15448v2.pdf",
-    "resume": false
+    "only_doc": null,
+    "resume": false,
+    "retrieval": "hybrid",
+    "embedding_model": "embeddinggemma:latest"
   },
   "runtime": {
     "python_version": "3.11.14",
@@ -53,6 +103,6 @@
       "pypdf": "6.10.2",
       "pymupdf4llm": "1.27.2.2"
     },
-    "git_commit": "4ae46d3"
+    "git_commit": "cdc9a49"
   }
 }
