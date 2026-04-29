@@ -45,6 +45,14 @@ def test_chunk_text_empty_input():
     assert gd.chunk_text("", chunk_size=200, chunk_overlap=50) == []
 
 
+def test_chunk_text_prefers_word_boundary_near_limit():
+    text = "alpha " * 100
+    chunks = gd.chunk_text(text, chunk_size=182, chunk_overlap=30)
+    assert len(chunks) > 1
+    assert all(len(c) <= 182 for c in chunks)
+    assert chunks[0].split()[-1] == "alpha"
+
+
 def test_clean_markdown_artifacts_removes_picture_and_ref_noise():
     text = "Virtual memory in the 80 computer. == picture 188 x 297 intentionally omitted <== OS/360 stayed."
     cleaned = gd.clean_markdown_artifacts(text)
@@ -283,6 +291,44 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
     assert items[0]["source_chunk_ids"] == []
 
 
+def test_generated_item_excerpt_uses_verified_source_chunk(monkeypatch):
+    topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=["k"])
+    context = (
+        "[doc-chunk-0000] Abstract overview unrelated to the generated answer. "
+        "[doc-chunk-0001] Results show consistently negative Sortino ratios and weak downside protection."
+    )
+
+    def fake_call(*_, **__):
+        return (
+            {
+                "items": [
+                    {
+                        "question": "q",
+                        "answer": "negative Sortino ratios",
+                        "type": "factual",
+                        "difficulty": "medium",
+                        "context_source": "negative Sortino ratios and weak downside protection",
+                    }
+                ]
+            },
+            "",
+        )
+
+    monkeypatch.setattr("engine._generation.call_ollama_json", fake_call)
+    items, _ = gd.generate_items_for_topic(
+        model="m",
+        document="doc.pdf",
+        topic=topic,
+        topic_context=context,
+        language="en",
+        questions_per_topic=1,
+        temperature=0.0,
+        existing_questions=[],
+    )
+    assert items[0]["source_chunk_ids"] == ["doc-chunk-0001"]
+    assert items[0]["context_excerpt"].startswith("[doc-chunk-0001]")
+
+
 def test_find_verified_context_source_repairs_from_answer_overlap():
     context = (
         "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly. "
@@ -295,6 +341,44 @@ def test_find_verified_context_source_repairs_from_answer_overlap():
     )
     assert verified is True
     assert source == "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly."
+
+
+def test_context_excerpt_for_fragment_anchors_to_source_chunk():
+    context = (
+        "[doc-chunk-0000] Abstract text that is relevant to a different question. "
+        "[doc-chunk-0001] Results show consistently negative Sortino ratios and weak downside protection."
+    )
+    excerpt = gd.context_excerpt_for_fragment(context, "negative Sortino ratios and weak downside", max_chars=160)
+    assert excerpt.startswith("[doc-chunk-0001]")
+    assert "doc-chunk-0000" not in excerpt
+    assert "negative Sortino ratios" in excerpt
+
+
+def test_context_excerpt_for_fragment_keeps_distant_source_visible():
+    context = (
+        "[doc-chunk-0004] "
+        + ("background sentence. " * 40)
+        + "The dataset used in this study consists of minute-level historical stock data."
+    )
+    source = "The dataset used in this study consists of minute-level historical stock data."
+    excerpt = gd.context_excerpt_for_fragment(context, source, max_chars=180)
+    assert excerpt.startswith("[doc-chunk-0004]")
+    assert source in excerpt
+
+
+def test_context_excerpt_for_fragment_fallback_keeps_word_boundary():
+    context = "[doc-chunk-0000] " + ("alpha " * 100)
+    excerpt = gd.context_excerpt_for_fragment(context, "missing fragment", max_chars=125)
+    assert len(excerpt) <= 125
+    assert excerpt.split()[-1] == "alpha"
+
+
+def test_find_verified_context_source_truncates_on_word_boundary():
+    long_source = " ".join(["alpha"] * 80)
+    source, verified = gd.find_verified_context_source(long_source, "alpha alpha alpha", long_source)
+    assert verified is True
+    assert len(source) <= 300
+    assert source.split()[-1] == "alpha"
 
 
 def test_sample_existing_questions_respects_limit():

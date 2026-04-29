@@ -5,7 +5,14 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from engine._config import STOPWORDS
-from engine._text import normalize_whitespace, sanitize_question, strip_accents_ascii
+from engine._text import (
+    normalize_whitespace,
+    sanitize_question,
+    strip_accents_ascii,
+    truncate_text,
+)
+
+_CHUNK_MARKER_RE = re.compile(r"\[([^\]]+-chunk-\d{4})\]")
 
 
 def _content_words(text: str) -> list[str]:
@@ -20,7 +27,7 @@ def _content_words(text: str) -> list[str]:
 def find_verified_context_source(raw_source: str, answer: str, topic_context: str) -> tuple[str, bool]:
     """Find a literal context fragment that supports an answer."""
     normalized_context = normalize_whitespace(topic_context)
-    source = normalize_whitespace(raw_source)[:300]
+    source = _truncate_excerpt(raw_source, 300)
     if source and source.lower() in normalized_context.lower():
         start = normalized_context.lower().find(source.lower())
         return normalized_context[start : start + len(source)], True
@@ -44,21 +51,85 @@ def find_verified_context_source(raw_source: str, answer: str, topic_context: st
             best_score = score
 
     if best_sentence and best_score >= 0.6:
-        return best_sentence[:300], True
+        return _truncate_excerpt(best_sentence, 300), True
     return "", False
 
 
 def source_chunk_ids_for_fragment(topic_context: str, fragment: str) -> list[str]:
     """Infer chunk ids that contain or precede a source fragment."""
-    chunk_ids = re.findall(r"\[([^\]]+-chunk-\d{4})\]", topic_context)
+    normalized_context = normalize_whitespace(topic_context)
+    chunk_ids = _CHUNK_MARKER_RE.findall(normalized_context)
     if not fragment:
         return chunk_ids[:1]
-    fragment_pos = topic_context.lower().find(fragment.lower()[:80])
+    fragment_pos = normalized_context.lower().find(normalize_whitespace(fragment).lower()[:80])
     if fragment_pos < 0:
         return chunk_ids[:1]
-    prefix = topic_context[:fragment_pos]
-    preceding = re.findall(r"\[([^\]]+-chunk-\d{4})\]", prefix)
+    prefix = normalized_context[:fragment_pos]
+    preceding = _CHUNK_MARKER_RE.findall(prefix)
     return preceding[-1:] if preceding else chunk_ids[:1]
+
+
+def _truncate_excerpt(text: str, max_chars: int) -> str:
+    """Trim an excerpt without ending in the middle of a word when possible."""
+    excerpt = normalize_whitespace(text)
+    if len(excerpt) <= max_chars:
+        return excerpt
+    shortened = truncate_text(excerpt, max_chars).strip()
+    if len(shortened) <= max_chars and not re.search(r"\w$", shortened):
+        return shortened.rstrip(" ,;:")
+    partial = excerpt[:max_chars]
+    last_space = partial.rfind(" ")
+    if last_space > int(max_chars * 0.6):
+        return partial[:last_space].rstrip(" ,;:")
+    return partial.rstrip(" ,;:")
+
+
+def context_excerpt_for_fragment(topic_context: str, fragment: str, max_chars: int = 500) -> str:
+    """Return an excerpt anchored to the chunk that contains a supporting fragment."""
+    normalized_context = normalize_whitespace(topic_context)
+    if not normalized_context or max_chars <= 0:
+        return ""
+
+    normalized_fragment = normalize_whitespace(fragment)
+    fragment_pos = -1
+    if normalized_fragment:
+        fragment_pos = normalized_context.lower().find(normalized_fragment.lower()[:80])
+
+    if fragment_pos < 0:
+        return _truncate_excerpt(normalized_context, max_chars)
+
+    marker_start = 0
+    marker_end = 0
+    for match in _CHUNK_MARKER_RE.finditer(normalized_context):
+        if match.start() <= fragment_pos:
+            marker_start = match.start()
+            marker_end = match.end()
+        else:
+            break
+
+    marker = normalized_context[marker_start:marker_end]
+    chunk_body_start = marker_end
+    if normalized_context[chunk_body_start : chunk_body_start + 1] == " ":
+        chunk_body_start += 1
+
+    body_budget = max_chars - len(marker) - 1
+    if body_budget <= 0:
+        return _truncate_excerpt(marker, max_chars)
+
+    fragment_offset = max(0, fragment_pos - chunk_body_start)
+    body = normalized_context[chunk_body_start:]
+    body_start = 0
+    if fragment_offset > max(80, body_budget // 4):
+        body_start = max(0, fragment_offset - max(60, body_budget // 5))
+        boundary = body.rfind(" ", 0, body_start)
+        if boundary > 0:
+            body_start = boundary + 1
+
+    prefix = f"{marker} "
+    if body_start > 0:
+        prefix = f"{marker} ... "
+        body_budget = max_chars - len(prefix)
+    return prefix + _truncate_excerpt(body[body_start:], body_budget)
 
 
 def has_quality_artifact(item: dict[str, Any]) -> bool:

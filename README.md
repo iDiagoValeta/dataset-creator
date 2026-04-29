@@ -366,7 +366,7 @@ Each line in the JSONL files is a JSON object with these fields:
 | `document_language` | string | Detected or forced language code |
 | `source_chunk_ids` | array | Chunk IDs where the answer source was found |
 | `created_at` | string | ISO 8601 timestamp |
-| `context_excerpt` | string | Beginning of the topic context window (diagnostic) |
+| `context_excerpt` | string | Diagnostic excerpt from the source chunk around the supporting fragment |
 
 ## Tests and lint
 

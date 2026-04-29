@@ -109,6 +109,7 @@ from engine._quality import (  # noqa: F401
     _content_words,
     _question_bigrams,
     apply_quality_gate,
+    context_excerpt_for_fragment,
     deduplicate_items,
     find_verified_context_source,
     has_quality_artifact,

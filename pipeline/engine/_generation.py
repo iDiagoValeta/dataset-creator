@@ -12,7 +12,11 @@ from engine._prompts import (
     build_topic_generation_messages_compact,
     truncate_text,
 )
-from engine._quality import find_verified_context_source, source_chunk_ids_for_fragment
+from engine._quality import (
+    context_excerpt_for_fragment,
+    find_verified_context_source,
+    source_chunk_ids_for_fragment,
+)
 from engine._text import clean_generated_text, normalize_whitespace, now_iso
 
 
@@ -64,13 +68,15 @@ def generate_items_for_topic(
             raw_difficulty = str(item.get("difficulty", "medium")).strip().lower()
             difficulty = raw_difficulty if raw_difficulty in VALID_DIFFICULTIES else "medium"
 
-            raw_source = clean_generated_text(str(item.get("context_source", "")).strip())[:300]
+            raw_source = clean_generated_text(str(item.get("context_source", "")).strip())
             # Strip chunk-id markup the model may have copied from the prompt
             raw_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", raw_source).strip()
             context_source, context_verified = find_verified_context_source(raw_source, answer, topic_context)
             if not context_source:
                 context_source = normalize_whitespace(topic_context[:300])
             context_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", context_source).strip()
+            source_chunk_ids = source_chunk_ids_for_fragment(topic_context, context_source)
+            context_excerpt = context_excerpt_for_fragment(topic_context, context_source)
 
             normalized_local.append(
                 {
@@ -86,9 +92,9 @@ def generate_items_for_topic(
                     "topic_keywords": topic.keywords,
                     "document": document,
                     "document_language": item_document_language,
-                    "source_chunk_ids": source_chunk_ids_for_fragment(topic_context, context_source),
+                    "source_chunk_ids": source_chunk_ids,
                     "created_at": now_iso(),
-                    "context_excerpt": normalize_whitespace(topic_context[:500]),
+                    "context_excerpt": context_excerpt,
                 }
             )
         return normalized_local

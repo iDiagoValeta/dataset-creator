@@ -54,7 +54,14 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
     chunks: list[str] = []
     step = max(1, chunk_size - chunk_overlap)
     for start in range(0, len(cleaned), step):
-        chunk = cleaned[start : start + chunk_size].strip()
+        end = min(len(cleaned), start + chunk_size)
+        if end < len(cleaned) and cleaned[end - 1].isalnum() and cleaned[end : end + 1].isalnum():
+            partial = cleaned[start:end]
+            min_boundary = max(step, int(chunk_size * 0.6))
+            boundary = max(partial.rfind("\n\n"), partial.rfind("\n"), partial.rfind(" "))
+            if boundary >= min_boundary:
+                end = start + boundary
+        chunk = cleaned[start:end].strip()
         if len(chunk) >= 120:
             chunks.append(chunk)
         if start + chunk_size >= len(cleaned):
