@@ -33,6 +33,18 @@ _DOMAIN_TERMS: dict[str, set[str]] = {
 }
 
 
+def clean_context_artifacts(text: str) -> str:
+    """Remove inline extraction artifacts while preserving readable evidence text."""
+    cleaned = str(text)
+    cleaned = re.sub(r"<\s*br\b\s*/?\s*>?", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"==\s*picture\b.*?intentionally omitted\s*<==", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"-----\s*Start of picture text\s*-----", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"-----\s*End of picture text\s*-----", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"(\w)-\s+(\w)", r"\1\2", cleaned)
+    return normalize_whitespace(cleaned)
+
+
 def _content_words(text: str) -> list[str]:
     """Return normalized content words for lightweight support checks."""
     return [
@@ -56,8 +68,8 @@ def _normalized_terms(text: str) -> set[str]:
 
 def find_verified_context_source(raw_source: str, answer: str, topic_context: str) -> tuple[str, bool]:
     """Find a literal context fragment that supports an answer."""
-    normalized_context = normalize_whitespace(topic_context)
-    source = _truncate_excerpt(raw_source, 300)
+    normalized_context = clean_context_artifacts(topic_context)
+    source = _truncate_excerpt(clean_context_artifacts(raw_source), 300)
     if source and source.lower() in normalized_context.lower():
         start = normalized_context.lower().find(source.lower())
         return normalized_context[start : start + len(source)], True
@@ -87,7 +99,7 @@ def find_verified_context_source(raw_source: str, answer: str, topic_context: st
 
 def source_chunk_ids_for_fragment(topic_context: str, fragment: str) -> list[str]:
     """Infer chunk ids that contain or precede a source fragment."""
-    normalized_context = normalize_whitespace(topic_context)
+    normalized_context = clean_context_artifacts(topic_context)
     chunk_ids = _CHUNK_MARKER_RE.findall(normalized_context)
     if not fragment:
         return chunk_ids[:1]
@@ -101,7 +113,7 @@ def source_chunk_ids_for_fragment(topic_context: str, fragment: str) -> list[str
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
     """Trim an excerpt without ending in the middle of a word when possible."""
-    excerpt = normalize_whitespace(text)
+    excerpt = clean_context_artifacts(text)
     if len(excerpt) <= max_chars:
         return excerpt
     shortened = truncate_text(excerpt, max_chars).strip()
@@ -116,11 +128,11 @@ def _truncate_excerpt(text: str, max_chars: int) -> str:
 
 def context_excerpt_for_fragment(topic_context: str, fragment: str, max_chars: int = 500) -> str:
     """Return an excerpt anchored to the chunk that contains a supporting fragment."""
-    normalized_context = normalize_whitespace(topic_context)
+    normalized_context = clean_context_artifacts(topic_context)
     if not normalized_context or max_chars <= 0:
         return ""
 
-    normalized_fragment = normalize_whitespace(fragment)
+    normalized_fragment = clean_context_artifacts(fragment)
     fragment_pos = -1
     if normalized_fragment:
         fragment_pos = normalized_context.lower().find(normalized_fragment.lower()[:80])
@@ -169,6 +181,10 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
         for key in ("question", "answer", "context_source", "context_excerpt", "topic")
     ).lower()
     if "intentionally omitted" in text or "== picture" in text:
+        return True
+    if re.search(r"<\s*br\b|<[^>]+>", text):
+        return True
+    if "fuctuation" in text or "fuctuations" in text:
         return True
     if "text cuts off" in text or "[the text" in text:
         return True
@@ -235,10 +251,28 @@ def has_topic_mismatch(item: dict[str, Any]) -> bool:
 
     if current_score == 0 and strongest_other >= 2:
         return True
-    if current_score <= 1 and strongest_other >= current_score + 3:
+    if current_score == 0 and strongest_other >= current_score + 3:
         return True
 
     return False
+
+
+def has_insufficient_context_support(item: dict[str, Any]) -> bool:
+    """Reject answers that add unsupported detail beyond the cited source."""
+    item_type = str(item.get("type", "")).lower()
+    if item_type not in {"compare", "inference"}:
+        return False
+
+    answer_terms = set(_content_words(str(item.get("answer", ""))))
+    if len(answer_terms) < 6:
+        return False
+    source_terms = set(_content_words(str(item.get("context_source", ""))))
+    if not source_terms:
+        return True
+
+    coverage = len(answer_terms & source_terms) / max(1, len(answer_terms))
+    threshold = 0.5 if item_type == "compare" else 0.35
+    return coverage <= threshold
 
 
 def audit_item_quality(item: dict[str, Any]) -> str | None:
@@ -249,6 +283,8 @@ def audit_item_quality(item: dict[str, Any]) -> str | None:
         return "truncated_context_source"
     if has_first_person_answer(item):
         return "first_person_answer"
+    if has_insufficient_context_support(item):
+        return "insufficient_context_support"
     if has_topic_mismatch(item):
         return "topic_mismatch"
     return None
