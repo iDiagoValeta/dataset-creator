@@ -28,8 +28,8 @@ DEFAULT_QUALITY_GATE = os.getenv("DATASET_QUALITY_GATE", "strict")
 DEFAULT_OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT_SECS", "300"))
 DEFAULT_OLLAMA_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "3"))
 DEFAULT_OLLAMA_RETRY_BACKOFF = float(os.getenv("OLLAMA_RETRY_BACKOFF_SECS", "2.0"))
-DEFAULT_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", DEFAULT_MODEL)
-DEFAULT_RETRIEVAL_MODE = os.getenv("DATASET_RETRIEVAL", "lexical")
+DEFAULT_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest")
+DEFAULT_RETRIEVAL_MODE = os.getenv("DATASET_RETRIEVAL", "hybrid")
 
 MIN_TOPIC_CONTEXT_CHARS = 9000
 VALID_TYPES: frozenset[str] = frozenset({"factual", "conceptual", "inference", "compare", "definition"})
