@@ -4,6 +4,7 @@ import json
 import platform
 import random
 import subprocess
+from collections import defaultdict
 from collections.abc import Sequence
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -26,19 +27,107 @@ def split_rows(
     split: tuple[float, float, float],
     seed: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split rows into train/val/test using deterministic shuffle."""
-    train_ratio, val_ratio, test_ratio = split
+    """Split rows into train/val/test using deterministic topic-aware shuffle."""
+    train_ratio, val_ratio, _test_ratio = split
     shuffled = list(rows)
     random.Random(seed).shuffle(shuffled)
 
     total = len(shuffled)
     train_end = int(total * train_ratio)
     val_end = train_end + int(total * val_ratio)
+    target_val = val_end - train_end
+    target_test = total - val_end
+
+    if total and any("topic_id" in row for row in shuffled) and (target_val or target_test):
+        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in shuffled:
+            groups[str(row.get("topic_id", "__missing__"))].append(row)
+
+        rng = random.Random(seed)
+        group_keys = list(groups)
+        rng.shuffle(group_keys)
+        train_rows: list[dict[str, Any]] = []
+        val_rows: list[dict[str, Any]] = []
+        test_rows: list[dict[str, Any]] = []
+
+        for key in group_keys:
+            group = groups[key]
+            rng.shuffle(group)
+            remaining = list(group)
+            if target_val and len(remaining) >= 3 and len(val_rows) < target_val:
+                val_rows.append(remaining.pop())
+            if target_test and len(remaining) >= 2 and len(test_rows) < target_test:
+                test_rows.append(remaining.pop())
+            train_rows.extend(remaining)
+
+        while len(val_rows) < target_val and train_rows:
+            val_rows.append(train_rows.pop())
+        while len(test_rows) < target_test and train_rows:
+            test_rows.append(train_rows.pop())
+
+        rng.shuffle(train_rows)
+        rng.shuffle(val_rows)
+        rng.shuffle(test_rows)
+        return train_rows, val_rows, test_rows
 
     train_rows = shuffled[:train_end]
     val_rows = shuffled[train_end:val_end]
     test_rows = shuffled[val_end:]
     return train_rows, val_rows, test_rows
+
+
+def build_dataset_audit(
+    accepted_rows: Sequence[dict[str, Any]],
+    rejected_rows: Sequence[dict[str, Any]],
+    train_rows: Sequence[dict[str, Any]],
+    val_rows: Sequence[dict[str, Any]],
+    test_rows: Sequence[dict[str, Any]],
+    expected_topic_ids: Sequence[str] | None = None,
+    min_items_per_topic: int = 2,
+) -> dict[str, Any]:
+    """Build lightweight quality and coverage audit metrics for metadata."""
+    expected = list(dict.fromkeys(str(t) for t in (expected_topic_ids or []) if t))
+    accepted_by_topic: dict[str, int] = {}
+    rejected_by_topic: dict[str, int] = {}
+    split_by_topic = {"train": {}, "val": {}, "test": {}}
+
+    for row in accepted_rows:
+        topic_id = str(row.get("topic_id", "__missing__"))
+        accepted_by_topic[topic_id] = accepted_by_topic.get(topic_id, 0) + 1
+    for row in rejected_rows:
+        topic_id = str(row.get("topic_id", "__missing__"))
+        rejected_by_topic[topic_id] = rejected_by_topic.get(topic_id, 0) + 1
+    for split_name, rows_for_split in (("train", train_rows), ("val", val_rows), ("test", test_rows)):
+        for row in rows_for_split:
+            topic_id = str(row.get("topic_id", "__missing__"))
+            bucket = split_by_topic[split_name]
+            bucket[topic_id] = bucket.get(topic_id, 0) + 1
+
+    all_topics = sorted(set(expected) | set(accepted_by_topic) | set(rejected_by_topic))
+    topics_without_accepted = [topic_id for topic_id in all_topics if accepted_by_topic.get(topic_id, 0) == 0]
+    low_accepted_topics = [
+        topic_id
+        for topic_id in all_topics
+        if 0 < accepted_by_topic.get(topic_id, 0) < min_items_per_topic
+    ]
+
+    warnings: list[str] = []
+    if topics_without_accepted:
+        warnings.append(f"topics_without_accepted: {', '.join(topics_without_accepted)}")
+    if low_accepted_topics:
+        warnings.append(f"topics_below_{min_items_per_topic}_items: {', '.join(low_accepted_topics)}")
+    for split_name, rows_for_split in (("val", val_rows), ("test", test_rows)):
+        if rows_for_split and len(split_by_topic[split_name]) == 1 and len(all_topics) > 1:
+            warnings.append(f"{split_name}_split_has_single_topic")
+
+    return {
+        "accepted_by_topic": accepted_by_topic,
+        "rejected_by_topic": rejected_by_topic,
+        "split_by_topic": split_by_topic,
+        "topics_without_accepted": topics_without_accepted,
+        "low_accepted_topics": low_accepted_topics,
+        "warnings": warnings,
+    }
 
 
 def write_metadata(path: Path, metadata: dict[str, Any]) -> None:
