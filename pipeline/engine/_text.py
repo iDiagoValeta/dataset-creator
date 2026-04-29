@@ -64,6 +64,8 @@ def clean_markdown_artifacts(text: str) -> str:
     cleaned = re.sub(r"(?:\b\w+\b\s*/\s*){2,}\w+\b", " ", cleaned)
     # Pure numeric table rows: four or more numbers on a single line
     cleaned = re.sub(r"^\s*[-+]?\d*\.?\d+(?:\s+[-+]?\d*\.?\d+){3,}\s*$", " ", cleaned, flags=re.MULTILINE)
+    cleaned = normalize_domain_terms(cleaned)
+    cleaned = strip_non_content_tail_sections(cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return normalize_whitespace(cleaned)
 
@@ -76,10 +78,46 @@ def clean_generated_text(text: str) -> str:
     cleaned = cleaned.replace('Ã¢â‚¬Å"', '"').replace("Ã¢â‚¬Â", '"')
     cleaned = re.sub(r"==\s*picture\s+\d+\s+x\s+\d+\s+intentionally omitted\s*<==", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"(?<![A-Za-z/.\d-])\b\d{2,3}\b(?![A-Za-z/.\d%-])", " ", cleaned)
+    cleaned = normalize_domain_terms(cleaned)
     cleaned = normalize_whitespace(cleaned)
     if cleaned:
         cleaned = cleaned[0].upper() + cleaned[1:]
     return cleaned
+
+
+def normalize_domain_terms(text: str) -> str:
+    """Repair common PDF word-join artifacts in finance/ML papers."""
+    replacements = {
+        r"\briskadjusted\b": "risk-adjusted",
+        r"\briskreward\b": "risk-reward",
+        r"\bgainsloss\b": "gains-loss",
+        r"\bhighfrequency\b": "high-frequency",
+        r"\boutofsample\b": "out-of-sample",
+        r"\binsample\b": "in-sample",
+        r"\bpricebased\b": "price-based",
+        r"\btimeseries\b": "time-series",
+    }
+    cleaned = text
+    for pattern, replacement in replacements.items():
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.I)
+    return cleaned
+
+
+def strip_non_content_tail_sections(text: str) -> str:
+    """Drop bibliography/code tail sections that should not seed QA generation."""
+    headings = (
+        "references",
+        "bibliography",
+        "code availability",
+        "data availability",
+        "acknowledgements",
+        "acknowledgments",
+    )
+    pattern = r"(?im)^\s*(?:" + "|".join(re.escape(heading) for heading in headings) + r")\s*$"
+    for match in re.finditer(pattern, text):
+        if match.start() > len(text) * 0.2:
+            return text[: match.start()]
+    return text
 
 
 def now_iso() -> str:
