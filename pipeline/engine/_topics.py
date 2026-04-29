@@ -382,6 +382,48 @@ def score_chunk_for_topic(chunk: Chunk, topic: Topic) -> int:
     return score
 
 
+def _score_chunks_semantic(
+    chunks: Sequence[Chunk],
+    topic: Topic,
+    embedding_model: str,
+    embedding_cache: dict[str, list[float]] | None,
+) -> list[tuple[float, Chunk]]:
+    """Score chunks by cosine similarity to the topic embedding."""
+    cache: dict[str, list[float]] = embedding_cache if embedding_cache is not None else {}
+    topic_emb = get_topic_embedding(topic, embedding_model)
+    if not topic_emb:
+        logger.warning("Embedding vacío para topic '%s'; usando scoring léxico.", topic.name)
+        return [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
+    return [
+        (max(0.0, score_chunk_for_topic_semantic(chunk, topic, topic_emb, embedding_model, cache)), chunk)
+        for chunk in chunks
+    ]
+
+
+def _score_chunks_hybrid(
+    chunks: Sequence[Chunk],
+    topic: Topic,
+    embedding_model: str,
+    embedding_cache: dict[str, list[float]] | None,
+) -> list[tuple[float, Chunk]]:
+    """Combine normalized lexical score and semantic similarity."""
+    lexical_scores = [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
+    max_lexical = max((score for score, _ in lexical_scores), default=0.0)
+
+    cache: dict[str, list[float]] = embedding_cache if embedding_cache is not None else {}
+    topic_emb = get_topic_embedding(topic, embedding_model)
+    if not topic_emb:
+        logger.warning("Embedding vacío para topic '%s'; usando scoring léxico.", topic.name)
+        return lexical_scores
+
+    scored: list[tuple[float, Chunk]] = []
+    for lexical_score, chunk in lexical_scores:
+        lexical_norm = lexical_score / max_lexical if max_lexical > 0.0 else 0.0
+        semantic_score = max(0.0, score_chunk_for_topic_semantic(chunk, topic, topic_emb, embedding_model, cache))
+        scored.append(((0.4 * lexical_norm) + (0.6 * semantic_score), chunk))
+    return scored
+
+
 def build_topic_context(
     chunks: Sequence[Chunk],
     topic: Topic,
@@ -410,16 +452,9 @@ def build_topic_context(
                     return "\n\n".join(selected_blocks)
 
     if retrieval_mode == "semantic":
-        cache: dict[str, list[float]] = embedding_cache if embedding_cache is not None else {}
-        topic_emb = get_topic_embedding(topic, embedding_model)
-        if not topic_emb:
-            logger.warning("Embedding vacío para topic '%s'; usando scoring léxico.", topic.name)
-            scored = [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
-        else:
-            scored = [
-                (score_chunk_for_topic_semantic(chunk, topic, topic_emb, embedding_model, cache), chunk)
-                for chunk in chunks
-            ]
+        scored = _score_chunks_semantic(chunks, topic, embedding_model, embedding_cache)
+    elif retrieval_mode == "hybrid":
+        scored = _score_chunks_hybrid(chunks, topic, embedding_model, embedding_cache)
     else:
         scored = [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
 
