@@ -129,15 +129,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--retrieval",
-        choices=["lexical", "semantic"],
+        choices=["lexical", "semantic", "hybrid"],
         default=DEFAULT_RETRIEVAL_MODE,
-        help="Método de selección de chunks por topic. 'semantic' usa embeddings Ollama. Default: lexical.",
+        help=(
+            "Método de selección de chunks por topic. "
+            "'hybrid' combina scoring léxico y embeddings Ollama. Default: hybrid."
+        ),
     )
     parser.add_argument(
         "--embedding-model",
         type=str,
         default=DEFAULT_EMBEDDING_MODEL,
-        help="Modelo Ollama para embeddings (solo con --retrieval semantic). Default: mismo que --model.",
+        help="Modelo Ollama para embeddings (con --retrieval semantic o hybrid). Default: embeddinggemma:latest.",
     )
     g = parser.add_argument_group("User-supplied topics / questions")
     g.add_argument(
@@ -182,8 +185,10 @@ def validate_args(args: argparse.Namespace) -> None:
         errors.append(f"--topics-file: archivo no encontrado: {args.topics_file}")
     if getattr(args, "questions_file", None) and not args.questions_file.exists():
         errors.append(f"--questions-file: archivo no encontrado: {args.questions_file}")
-    if getattr(args, "retrieval", "lexical") == "semantic" and not getattr(args, "embedding_model", "").strip():
-        errors.append("--embedding-model no puede estar vacío cuando --retrieval es 'semantic'")
+    if getattr(args, "retrieval", "lexical") in {"semantic", "hybrid"} and not getattr(
+        args, "embedding_model", ""
+    ).strip():
+        errors.append("--embedding-model no puede estar vacío cuando --retrieval es 'semantic' o 'hybrid'")
 
     if errors:
         for err in errors:
