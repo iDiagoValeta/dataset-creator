@@ -1,38 +1,36 @@
 {
-  "created_at": "2026-04-28T22:42:32.919065+00:00",
+  "created_at": "2026-04-29T10:10:14.558862+00:00",
   "model": "gemma4:e4b",
   "language": "auto",
   "document_languages": {
     "2412.15448v2.pdf": "en"
   },
-  "source_dir": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\input",
-  "output": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\output\\dataset.jsonl",
+  "source_dir": "examples",
+  "output": "examples\\dataset.jsonl",
   "pdf_count": 1,
   "chunk_count": 25,
   "topic_count": 3,
   "generated_items": 18,
-  "deduplicated_items": 12,
-  "accepted_items": 12,
-  "rejected_items": 6,
-  "context_source_verified_items": 12,
+  "deduplicated_items": 18,
+  "accepted_items": 18,
+  "rejected_items": 0,
+  "context_source_verified_items": 18,
   "quality": {
     "gate": "strict",
-    "accepted_items": 12,
-    "rejected_items": 6,
-    "verified_items": 12,
+    "accepted_items": 18,
+    "rejected_items": 0,
+    "verified_items": 18,
     "verified_ratio": 1.0,
-    "rejection_reasons": {
-      "artifact_or_reference_noise": 6
-    },
-    "accepted_items_before_dedup": 12,
-    "verified_items_before_dedup": 12,
+    "rejection_reasons": {},
+    "accepted_items_before_dedup": 18,
+    "verified_items_before_dedup": 18,
     "duplicate_items_removed_after_quality": 0
   },
   "resumed_documents": 0,
   "split": {
-    "train": 9,
+    "train": 14,
     "val": 1,
-    "test": 2
+    "test": 3
   },
   "params": {
     "chunk_size": 3500,
@@ -44,7 +42,7 @@
     "max_doc_context_chars": 110000,
     "max_topic_context_chars": 24000,
     "quality_gate": "strict",
-    "only_doc": null,
+    "only_doc": "2412.15448v2.pdf",
     "resume": false
   },
   "runtime": {
@@ -55,6 +53,6 @@
       "pypdf": "6.10.2",
       "pymupdf4llm": "1.27.2.2"
     },
-    "git_commit": "10ffc2c"
+    "git_commit": "4ae46d3"
   }
 }
