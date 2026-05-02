@@ -1,4 +1,6 @@
 """Unit tests for pure functions in generate_dataset."""
+import json
+import re
 from pathlib import Path
 
 import generate_dataset as gd
@@ -778,6 +780,68 @@ def test_build_dataset_audit_reports_topic_and_split_warnings():
 
 # --- judge audit ------------------------------------------------------
 
+def test_build_judge_messages_payload_contains_only_essential_fields():
+    item = {
+        "question": "Q?",
+        "answer": "A.",
+        "context_source": "Ctx.",
+        "topic": "T",
+        "type": "factual",
+        "difficulty": "easy",
+        "document_language": "en",
+        "context_excerpt": "Extra.",
+    }
+    messages = gd.build_judge_messages(item)
+    user_content = messages[-1]["content"]
+    payload = json.loads(user_content.split("QA item:\n", 1)[1])
+
+    assert set(payload.keys()) == {"question", "answer", "context_source"}
+    assert re.search(r'"(topic|type|difficulty|document_language|context_excerpt)"', user_content) is None
+
+
+def test_audit_items_per_document_produces_same_judged_rows(monkeypatch):
+    items = [
+        {"id": "a1", "document": "doc-a.pdf", "question": "q1", "answer": "a1", "context_source": "ctx1"},
+        {"id": "b1", "document": "doc-b.pdf", "question": "q2", "answer": "a2", "context_source": "ctx2"},
+        {"id": "a2", "document": "doc-a.pdf", "question": "q3", "answer": "a3", "context_source": "ctx3"},
+    ]
+    calls = []
+
+    def fake_audit(batch, model, temperature, seed):  # noqa: ARG001
+        calls.append([item["id"] for item in batch])
+        judged = [
+            {
+                **item,
+                "judge_score": 1.0,
+                "judge_context_quality": 1.0,
+                "judge_answer_support": 1.0,
+                "judge_question_quality": 1.0,
+                "judge_decision": "pass",
+                "judge_reasons": ["factual"],
+                "judge_explanation": "ok",
+                "judge_model": model,
+            }
+            for item in batch
+        ]
+        return judged, gd.build_judge_stats("audit", model, judged)
+
+    monkeypatch.setattr(gd, "audit_items_with_judge", fake_audit)
+
+    all_at_once, _ = fake_audit(items, model="judge-model", temperature=0.0, seed=1)
+    calls.clear()
+    by_document, stats = gd.audit_items_with_judge_by_document(
+        items,
+        model="judge-model",
+        temperature=0.0,
+        seed=1,
+    )
+
+    assert calls == [["a1", "a2"], ["b1"]]
+    assert {item["id"] for item in by_document} == {item["id"] for item in all_at_once}
+    assert stats["judged_items"] == 3
+    assert stats["decision_counts"] == {"pass": 3}
+
+
 def test_normalize_judge_result_coerces_valid_public_fields():
     result = gd.normalize_judge_result(
         {
@@ -800,7 +864,7 @@ def test_normalize_judge_result_coerces_valid_public_fields():
     assert result["judge_model"] == "judge-model"
 
 
-@pytest.mark.parametrize("reason", ["weak_context", "unsupported_detail", "truncated_context", "extraction_artifact"])
+@pytest.mark.parametrize("reason", ["unsupported_detail", "truncated_context", "extraction_artifact"])
 def test_normalize_judge_result_blocking_reasons_force_fail(reason):
     result = gd.normalize_judge_result(
         {
@@ -811,6 +875,41 @@ def test_normalize_judge_result_blocking_reasons_force_fail(reason):
             "decision": "pass",
             "reasons": [reason],
             "explanation": "The item has a blocking issue.",
+        },
+        model="judge-model",
+    )
+    assert result["judge_decision"] == "fail"
+    assert result["judge_score"] <= 0.35
+
+
+@pytest.mark.parametrize("reason", ["weak_context", "judge_error"])
+def test_normalize_judge_result_reconciles_noisy_pass_reasons(reason):
+    result = gd.normalize_judge_result(
+        {
+            "context_quality": 1.0,
+            "answer_support": 1.0,
+            "question_quality": 1.0,
+            "overall_score": 1.0,
+            "decision": "pass",
+            "reasons": [reason],
+            "explanation": "The answer is fully supported by the context.",
+        },
+        model="judge-model",
+    )
+    assert result["judge_decision"] == "pass"
+    assert result["judge_reasons"] == ["factual"]
+
+
+def test_normalize_judge_result_weak_context_still_fails_without_pass_confidence():
+    result = gd.normalize_judge_result(
+        {
+            "context_quality": 0.7,
+            "answer_support": 0.7,
+            "question_quality": 0.7,
+            "overall_score": 0.7,
+            "decision": "review",
+            "reasons": ["weak_context"],
+            "explanation": "The context is too weak.",
         },
         model="judge-model",
     )
