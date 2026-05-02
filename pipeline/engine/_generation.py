@@ -14,10 +14,11 @@ from engine._prompts import (
 )
 from engine._quality import (
     context_excerpt_for_fragment,
+    fallback_context_source,
     find_verified_context_source,
     source_chunk_ids_for_fragment,
 )
-from engine._text import clean_generated_text, normalize_whitespace, now_iso
+from engine._text import clean_generated_text, now_iso
 
 
 def _normalize_paper_voice(answer: str) -> str:
@@ -100,12 +101,12 @@ def generate_items_for_topic(
             difficulty = raw_difficulty if raw_difficulty in VALID_DIFFICULTIES else "medium"
 
             raw_source = clean_generated_text(str(item.get("context_source", "")).strip())
-            # Strip chunk-id markup the model may have copied from the prompt
-            raw_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", raw_source).strip()
+            # Strip chunk-id markup the model may have copied from the prompt — any position.
+            raw_source = re.sub(r"\[[\w.-]+-chunk-\d{4,}\]\s*", "", raw_source).strip()
             context_source, context_verified = find_verified_context_source(raw_source, answer, topic_context)
             if not context_source:
-                context_source = normalize_whitespace(topic_context[:300])
-            context_source = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", context_source).strip()
+                context_source = fallback_context_source(topic_context)
+            context_source = re.sub(r"\[[\w.-]+-chunk-\d{4,}\]\s*", "", context_source).strip()
             source_chunk_ids = source_chunk_ids_for_fragment(topic_context, context_source)
             context_excerpt = context_excerpt_for_fragment(topic_context, context_source)
 
