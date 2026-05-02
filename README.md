@@ -8,7 +8,7 @@ I needed high-quality QA datasets for my own projects, especially in **Spanish (
 
 This repository automates that workflow end-to-end: extract text from PDFs, detect the document language, map topics, generate grounded QA pairs with a local Ollama model, deduplicate, and export ready-to-train JSONL splits, all while keeping traceability back to the source context.
 
-The pipeline extracts text, detects the document language, maps topics, generates grounded Q/A pairs, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks.
+The pipeline extracts text, detects the document language, maps topics, generates grounded Q/A pairs, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset.
 
 ## Quick Start
 
@@ -18,6 +18,7 @@ Requirements:
 - Ollama running locally
 - Generator model: `gemma4:e4b`
 - Embedding model for default hybrid retrieval: `embeddinggemma:latest`
+- Optional judge model for `--judge audit`: `gemma4:e4b`
 
 ```bash
 pip install -r pipeline/requirements.txt
@@ -76,6 +77,10 @@ python pipeline/generate_dataset.py --retrieval lexical
 python pipeline/generate_dataset.py --retrieval semantic
 python pipeline/generate_dataset.py --retrieval hybrid --embedding-model nomic-embed-text
 
+# Factuality judge audit (does not filter dataset.jsonl)
+python pipeline/generate_dataset.py --judge audit
+python pipeline/generate_dataset.py --judge audit --judge-model llama3.1:8b
+
 # Resume or estimate
 python pipeline/generate_dataset.py --resume
 python pipeline/generate_dataset.py --dry-run
@@ -98,19 +103,24 @@ python pipeline/generate_dataset.py --clean
 | `--retrieval` | `hybrid` | `lexical`, `semantic`, or `hybrid` chunk selection |
 | `--embedding-model` | `embeddinggemma:latest` | Ollama model for semantic/hybrid retrieval |
 | `--quality-gate` | `strict` | `strict`, `balanced`, or `off` |
+| `--judge` | `off` | `off` or `audit`; audits final accepted rows without filtering |
+| `--judge-model` | `gemma4:e4b` | Ollama judge model; override with `OLLAMA_JUDGE_MODEL` or the CLI flag |
 | `--split` | `0.8,0.1,0.1` | Train/val/test ratios |
 | `--resume` | off | Reuse per-document checkpoints |
 | `--clean` | off | Remove generated JSON/JSONL artifacts |
 
 ## Quality And Metadata
 
-`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for compare/inference answers. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
+`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for compare/inference answers. `context_source_verified=true` means the context is a literal substring of the extracted document context after whitespace normalization; the pipeline does not infer or repair source context from answer overlap. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
+
+`--judge audit` runs an Ollama judge after quality filtering and deduplication. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. It writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
 
 The metadata file records:
 
 - generation counts and split sizes
 - detected document languages
 - quality gate stats and rejection reasons
+- judge audit stats when enabled
 - deduplication counts
 - topic coverage audit and warnings
 - runtime/package/git reproducibility info
@@ -141,6 +151,14 @@ id, question, answer, type, difficulty,
 context_source, context_source_verified, context_excerpt,
 topic, topic_id, topic_keywords,
 document, document_language, source_chunk_ids, created_at
+```
+
+For RAG-oriented use, the core supervised triple is `question`, literal `context_source`, and `answer`; the other fields are traceability and audit metadata.
+
+When `--judge audit` is enabled, `dataset.judged.jsonl` adds:
+
+```text
+judge_score, judge_decision, judge_reasons, judge_explanation, judge_model
 ```
 
 ## Tests
