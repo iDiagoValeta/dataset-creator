@@ -111,16 +111,23 @@ python pipeline/generate_dataset.py --clean
 
 ## Quality And Metadata
 
-`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for compare/inference answers. `context_source_verified=true` means the context is a literal substring of the extracted document context after whitespace normalization; the pipeline does not infer or repair source context from answer overlap. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
+`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for factual/definition/compare/inference answers. `context_source_verified=true` means the context is a literal substring of the extracted document context after whitespace normalization; the pipeline does not infer or repair source context from answer overlap. Verified context is expanded to complete sentence-bounded evidence when possible, so RAG rows favor complete literal support instead of clipped 300-character fragments. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
 
-`--judge audit` runs an Ollama judge after quality filtering and deduplication. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. It writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
+The deterministic quality gate also rejects:
+
+- **Mojibake** — double-encoded UTF-8 sequences (e.g. `â€™`, `Î¸`) in any Q/A field. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback.
+- **Cross-chunk context** (`cross_chunk_context`) — `context_source` that contains an internal chunk marker, meaning the LLM copied text spanning two source chunks. Markers are also stripped from generated text before quality checks.
+- **Verbatim answers** (`verbatim_answer`) — answers with ≥ 75 % bigram overlap with `context_source` and length comparable to the context (a proxy for copy-paste without reformulation).
+- Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, and answers that add too many unsupported content terms for RAG-style factual rows.
+
+`--judge audit` runs an Ollama judge after quality filtering and deduplication. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`, `weak_context`) force a `fail` decision regardless of the LLM score. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
 
 The metadata file records:
 
 - generation counts and split sizes
 - detected document languages
 - quality gate stats and rejection reasons
-- judge audit stats when enabled
+- judge audit stats when enabled, including overall and component score averages
 - deduplication counts
 - topic coverage audit and warnings
 - runtime/package/git reproducibility info
@@ -158,7 +165,9 @@ For RAG-oriented use, the core supervised triple is `question`, literal `context
 When `--judge audit` is enabled, `dataset.judged.jsonl` adds:
 
 ```text
-judge_score, judge_decision, judge_reasons, judge_explanation, judge_model
+judge_score, judge_context_quality, judge_answer_support,
+judge_question_quality, judge_decision, judge_reasons,
+judge_explanation, judge_model
 ```
 
 ## Tests
