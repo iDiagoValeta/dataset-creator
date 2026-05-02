@@ -78,7 +78,7 @@ pyproject.toml
 7. Apply the quality gate before deduplication. In `strict` mode, keep only clean items with verified source context, topic alignment, and enough source support; write rejected rows to `dataset.rejected.jsonl`.
 8. Backfill topics with fewer than 2 accepted rows, then rerun quality filtering.
 9. Deduplicate accepted items (exact + semantic via bigrams, including duplicate answers).
-10. Optionally run `--judge audit` over final accepted rows and write `dataset.judged.jsonl` without changing `dataset.jsonl`.
+10. Optionally run `--judge audit` over final accepted rows, grouped by document for progress and smaller judge batches, and write one combined `dataset.judged.jsonl` without changing `dataset.jsonl`.
 11. Export the main JSONL and topic-aware train/val/test splits.
 12. Persist metadata, audit stats, per-document/topic run logs, plus per-document checkpoints for `--resume`.
 
@@ -117,7 +117,7 @@ pyproject.toml
 - `balanced` keeps unverified context sources but still applies deterministic quality checks and circular-answer filtering.
 - `--judge off|audit` controls optional LLM factuality auditing after quality filtering and deduplication. Default `off` keeps current cost and output behavior.
 - `--judge-model MODEL` sets the Ollama model used by `--judge audit`. Defaults to `OLLAMA_JUDGE_MODEL`, whose default is `gemma4:e4b`.
-- The judge applies deterministic pre-checks (mojibake, internal chunk markers, near-verbatim answers) before calling the LLM. Blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`, `weak_context`) force `fail` regardless of LLM output. The minimum passing component score (context quality, answer support, question quality) is 0.6. Topic audit keys in `dataset.meta.json` use composite `"{document}::{topic_id}"` format to prevent cross-document collisions.
+- The judge audits accepted rows one document at a time, then writes one combined `dataset.judged.jsonl`. It applies deterministic pre-checks (mojibake, internal chunk markers, near-verbatim answers) before calling the LLM. Blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force `fail` regardless of LLM output. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing component score (context quality, answer support, question quality) is 0.6. Topic audit keys in `dataset.meta.json` use composite `"{document}::{topic_id}"` format to prevent cross-document collisions.
 - `--retrieval lexical|semantic|hybrid` selects the chunk retrieval strategy for topic context building. Default `hybrid` combines lexical scoring and Ollama embeddings; embeddings are cached per chunk within a document. Requires the embedding model to be available in Ollama.
 - `--embedding-model MODEL` sets the Ollama model used for embeddings when `--retrieval semantic` or `--retrieval hybrid`. Defaults to `embeddinggemma:latest`.
 - `--topics-file PATH` loads a YAML (requires `pyyaml`) or plain-text file with user-defined topics. Skips the LLM topic mapping step entirely. Topics get `topic_id` with prefix `user-`.
