@@ -483,6 +483,40 @@ def test_checkpoint_roundtrip(tmp_path: Path):
     assert gd.load_checkpoint_items(tmp_path, pdf) == items
 
 
+def test_infer_resume_counts_prefers_debug_metadata(tmp_path: Path):
+    pdf = tmp_path / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    (tmp_path / "Doc.json").write_text(
+        json.dumps(
+            {
+                "chunk_count": 7,
+                "topics": [
+                    {"topic_id": "topic-00"},
+                    {"topic_id": "topic-01"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    items = [
+        {"topic_id": "topic-00", "source_chunk_ids": ["doc-chunk-0001"]},
+        {"topic_id": "topic-01", "source_chunk_ids": ["doc-chunk-0002"]},
+    ]
+
+    assert gd.infer_resume_counts(tmp_path, pdf, items) == (7, 2)
+
+
+def test_infer_resume_counts_falls_back_to_checkpoint_items(tmp_path: Path):
+    pdf = tmp_path / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    items = [
+        {"topic_id": "topic-00", "source_chunk_ids": ["doc-chunk-0001", "doc-chunk-0002"]},
+        {"topic_id": "topic-01", "source_chunk_ids": ["doc-chunk-0002"]},
+    ]
+
+    assert gd.infer_resume_counts(tmp_path, pdf, items) == (2, 2)
+
+
 def test_context_source_falls_back_when_not_substring(monkeypatch):
     topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=[])
     context = "Pagination avoids fragmentation."
