@@ -6,6 +6,7 @@ from typing import Any
 
 from engine._config import STOPWORDS
 from engine._text import (
+    MOJIBAKE_PATTERN,
     normalize_whitespace,
     sanitize_question,
     strip_accents_ascii,
@@ -13,6 +14,11 @@ from engine._text import (
 )
 
 _CHUNK_MARKER_RE = re.compile(r"\[([^\]]+-chunk-\d{4})\]")
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s+|$)")
+_BAD_CONTEXT_ENDINGS: frozenset[str] = frozenset({
+    "a", "an", "and", "as", "at", "because", "by", "for", "from", "in", "into",
+    "of", "offering", "on", "or", "that", "the", "to", "with",
+})
 
 _DOMAIN_TERMS: dict[str, set[str]] = {
     "technical": {
@@ -70,28 +76,87 @@ def find_verified_context_source(raw_source: str, answer: str, topic_context: st
     """Return a context fragment only when it is a literal source substring."""
     normalized_context = normalize_whitespace(topic_context)
     source = normalize_whitespace(str(raw_source))
-    if len(source) > 300:
-        partial = source[:300]
-        last_space = partial.rfind(" ")
-        source = partial[:last_space].rstrip(" ,;:") if last_space > 180 else partial.rstrip(" ,;:")
     if source and source.lower() in normalized_context.lower():
         start = normalized_context.lower().find(source.lower())
-        return normalized_context[start : start + len(source)], True
+        end = start + len(source)
+        return _expand_literal_to_sentence_window(normalized_context, start, end), True
     return "", False
 
 
+def _expand_literal_to_sentence_window(context: str, start: int, end: int, max_chars: int = 700) -> str:
+    """Expand a verified literal match to complete surrounding sentence boundaries."""
+    left_floor = max(0, start - max_chars)
+    left_region = context[left_floor:start]
+    sentence_starts = [left_floor + m.end() for m in _SENTENCE_END_RE.finditer(left_region)]
+    chunk_starts = [m.end() + 1 for m in _CHUNK_MARKER_RE.finditer(context[left_floor:start])]
+    expanded_start = max(sentence_starts + chunk_starts, default=left_floor)
+
+    right_ceiling = min(len(context), end + max_chars)
+    right_region = context[end:right_ceiling]
+    right_match = _SENTENCE_END_RE.search(right_region)
+    expanded_end = end + right_match.end() if right_match else end
+
+    if expanded_end - expanded_start > max_chars:
+        expanded_start = start
+        right_match = _SENTENCE_END_RE.search(context[end:min(len(context), start + max_chars)])
+        expanded_end = end + right_match.end() if right_match else end
+    return context[expanded_start:expanded_end].strip()
+
+
+def fallback_context_source(topic_context: str, max_chars: int = 700) -> str:
+    """Return a readable context fallback without arbitrary mid-sentence clipping."""
+    normalized = normalize_whitespace(topic_context)
+    normalized = re.sub(r"^\[[\w.-]+-chunk-\d{4,}\]\s*", "", normalized).strip()
+    if not normalized or len(normalized) <= max_chars:
+        return normalized
+
+    for match in _SENTENCE_END_RE.finditer(normalized[:max_chars]):
+        if match.end() >= 80:
+            return normalized[:match.end()].strip()
+
+    partial = normalized[:max_chars]
+    last_space = partial.rfind(" ")
+    if last_space > int(max_chars * 0.6):
+        return partial[:last_space].rstrip(" ,;:")
+    return partial.rstrip(" ,;:")
+
+
 def source_chunk_ids_for_fragment(topic_context: str, fragment: str) -> list[str]:
-    """Infer chunk ids that contain or precede a source fragment."""
+    """Return all chunk IDs whose text range overlaps with the given source fragment.
+
+    When a fragment spans multiple chunks the list contains every involved chunk ID
+    in document order, making source_chunk_ids accurate for cross-chunk evidence.
+    """
     normalized_context = clean_context_artifacts(topic_context)
     chunk_ids = _CHUNK_MARKER_RE.findall(normalized_context)
     if not fragment:
         return chunk_ids[:1]
-    fragment_pos = normalized_context.lower().find(normalize_whitespace(fragment).lower()[:80])
+    norm_fragment = normalize_whitespace(fragment)
+    fragment_pos = normalized_context.lower().find(norm_fragment.lower()[:80])
     if fragment_pos < 0:
         return chunk_ids[:1]
-    prefix = normalized_context[:fragment_pos]
-    preceding = _CHUNK_MARKER_RE.findall(prefix)
-    return preceding[-1:] if preceding else chunk_ids[:1]
+    fragment_end = fragment_pos + len(norm_fragment)
+
+    # Build a list of (marker_start, chunk_id) pairs from left to right.
+    marker_positions: list[tuple[int, str]] = [
+        (m.start(), m.group(1)) for m in _CHUNK_MARKER_RE.finditer(normalized_context)
+    ]
+    if not marker_positions:
+        return chunk_ids[:1]
+
+    # Each chunk "owns" the text from its marker up to the next marker (or end of context).
+    involved: list[str] = []
+    for i, (pos, chunk_id) in enumerate(marker_positions):
+        next_pos = marker_positions[i + 1][0] if i + 1 < len(marker_positions) else len(normalized_context)
+        # Include this chunk when its range overlaps [fragment_pos, fragment_end).
+        if pos < fragment_end and next_pos > fragment_pos and chunk_id not in involved:
+            involved.append(chunk_id)
+
+    if not involved:
+        prefix = normalized_context[:fragment_pos]
+        preceding = _CHUNK_MARKER_RE.findall(prefix)
+        return preceding[-1:] if preceding else chunk_ids[:1]
+    return involved
 
 
 def _truncate_excerpt(text: str, max_chars: int) -> str:
@@ -181,15 +246,31 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
         return True
     if "\ufffd" in text:
         return True
+    if re.search(r"\(\s*dof\s*\)", text):
+        return True
+    if re.search(r"(?:\u2212|-|\?)\s*=\s*dof\b", text):
+        return True
     if re.search(r"\bsection\s*\)", text):
         return True
     if re.search(r"\bfigure\s*,", text):
+        return True
+    if re.search(r"\bfig(?:ure)?\.?\s*:", text):
+        return True
+    if re.search(r"\b(?:as\s+)?(?:summari[sz]ed|shown|reported|displayed|illustrated)\s+in figure\s+\d+\b", text):
         return True
     if re.search(r"[a-z]\?{2,}", text):
         return True
     if re.search(r"\?\s*=\s*(?:dof|[a-z])\b", text):
         return True
     if str(item.get("topic", "")).strip().lower().endswith("references"):
+        return True
+    # Detect surviving mojibake in context_source or answer (safety net if normalize_encoding missed it).
+    raw_text = " ".join(str(item.get(k, "")) for k in ("context_source", "answer", "question"))
+    if MOJIBAKE_PATTERN.search(raw_text):
+        return True
+    # Detect chunk-boundary markers anywhere inside context_source.
+    # A marker in the interior means the fragment crosses chunk boundaries.
+    if re.search(r"\[[\w.-]+-chunk-\d{4,}\]", str(item.get("context_source", ""))):
         return True
     return False
 
@@ -202,6 +283,13 @@ def has_truncated_context_source(item: dict[str, Any]) -> bool:
     first_words = source.split()[:2]
     if len(first_words) >= 2 and first_words[0].islower() and first_words[1][:1].isupper():
         return True
+    if re.match(r"^[a-z]{3,}\b", source):
+        return True
+    if len(source) > 120 and source[-1] not in ".;:!?)]":
+        return True
+    last_word_match = re.search(r"([A-Za-z]+)[^\w]*$", source.lower())
+    if len(source) > 40 and last_word_match and last_word_match.group(1) in _BAD_CONTEXT_ENDINGS:
+        return True
     return bool(re.match(r"^[a-z]{4,}\s+[A-Z][A-Za-z-]+", source))
 
 
@@ -209,6 +297,40 @@ def has_first_person_answer(item: dict[str, Any]) -> bool:
     """Return True when the answer is phrased from the paper authors' point of view."""
     answer = normalize_whitespace(str(item.get("answer", ""))).lower()
     return bool(re.match(r"^(?:we|our)\b", answer))
+
+
+def _answer_bigrams(text: str) -> frozenset:
+    """Word bigrams over tokens ≥3 chars for verbatim-copy detection."""
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", text.lower())
+    if len(words) < 2:
+        return frozenset(words)
+    return frozenset(zip(words, words[1:], strict=False))
+
+
+def has_verbatim_answer(item: dict[str, Any], threshold: float = 0.75) -> bool:
+    """Return True when the answer is a near-verbatim copy of context_source.
+
+    Uses bigram Jaccard coverage of the answer over context_source.  Only
+    triggers when both texts are long enough for a meaningful comparison AND
+    the answer is at least 75% of the context length — short concise answers
+    that paraphrase a single sentence are expected to share many bigrams and
+    should not be penalised.
+    """
+    answer = normalize_whitespace(str(item.get("answer", "")))
+    context = normalize_whitespace(str(item.get("context_source", "")))
+    answer_words = answer.split()
+    context_words = context.split()
+    if len(answer_words) < 8 or len(context_words) < 10:
+        return False
+    # A short answer that summarises the context is fine; only flag when the
+    # answer is almost as long as the context itself (likely a copy-paste).
+    if len(answer_words) < 0.75 * len(context_words):
+        return False
+    ab = _answer_bigrams(answer)
+    cb = _answer_bigrams(context)
+    if not ab:
+        return False
+    return len(ab & cb) / len(ab) >= threshold
 
 
 def _domain_scores(text: str) -> dict[str, int]:
@@ -253,7 +375,7 @@ def has_topic_mismatch(item: dict[str, Any]) -> bool:
 def has_insufficient_context_support(item: dict[str, Any]) -> bool:
     """Reject answers that add unsupported detail beyond the cited source."""
     item_type = str(item.get("type", "")).lower()
-    if item_type not in {"compare", "inference"}:
+    if item_type not in {"compare", "definition", "factual", "inference"}:
         return False
 
     answer_terms = set(_content_words(str(item.get("answer", ""))))
@@ -264,12 +386,24 @@ def has_insufficient_context_support(item: dict[str, Any]) -> bool:
         return True
 
     coverage = len(answer_terms & source_terms) / max(1, len(answer_terms))
-    threshold = 0.5 if item_type == "compare" else 0.35
-    return coverage <= threshold
+    if item_type == "inference":
+        threshold = 0.35
+        max_new_terms = 7
+    elif item_type == "compare":
+        threshold = 0.58
+        max_new_terms = 5
+    else:
+        threshold = 0.68
+        max_new_terms = 4
+    new_terms = answer_terms - source_terms
+    return coverage <= threshold or len(new_terms) >= max_new_terms
 
 
 def audit_item_quality(item: dict[str, Any]) -> str | None:
     """Return a rejection reason for deterministic item-level quality issues."""
+    # Cross-chunk marker: structurally invalid — check before artifact detection.
+    if re.search(r"\[[\w.-]+-chunk-\d{4,}\]", str(item.get("context_source", ""))):
+        return "cross_chunk_context"
     if has_quality_artifact(item):
         return "artifact_or_reference_noise"
     if has_truncated_context_source(item):
@@ -280,6 +414,9 @@ def audit_item_quality(item: dict[str, Any]) -> str | None:
         return "insufficient_context_support"
     if has_topic_mismatch(item):
         return "topic_mismatch"
+    # Verbatim check last: content errors take priority over reformulation quality.
+    if has_verbatim_answer(item):
+        return "verbatim_answer"
     return None
 
 
