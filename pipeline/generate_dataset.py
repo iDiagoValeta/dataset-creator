@@ -131,6 +131,7 @@ from engine._quality import (  # noqa: F401
     has_insufficient_context_support,
     has_quality_artifact,
     has_topic_mismatch,
+    has_verbatim_answer,
     is_circular_answer,
     source_chunk_ids_for_fragment,
 )
@@ -143,6 +144,7 @@ from engine._text import (  # noqa: F401
     detect_document_language,
     extract_keywords,
     normalize_domain_terms,
+    normalize_encoding,
     normalize_whitespace,
     now_iso,
     parse_split,
