@@ -13,7 +13,7 @@ DEFAULT_SOURCE_DIR = BASE_DIR / "input"
 DEFAULT_OUTPUT_PATH = BASE_DIR / "output" / "dataset.jsonl"
 DEFAULT_DEBUG_DIR = BASE_DIR / "run_logs"
 
-DEFAULT_MODEL = os.getenv("OLLAMA_DATASET_MODEL", os.getenv("OLLAMA_RAG_MODEL", "gemma4:e4b"))
+DEFAULT_MODEL = os.getenv("OLLAMA_DATASET_MODEL") or os.getenv("OLLAMA_RAG_MODEL") or "gemma4:e4b"
 DEFAULT_LANGUAGE = os.getenv("DATASET_LANGUAGE", "auto")
 DEFAULT_CHUNK_SIZE = int(os.getenv("DATASET_CHUNK_SIZE", "3500"))
 DEFAULT_CHUNK_OVERLAP = int(os.getenv("DATASET_CHUNK_OVERLAP", "350"))
@@ -28,13 +28,16 @@ DEFAULT_QUALITY_GATE = os.getenv("DATASET_QUALITY_GATE", "strict")
 DEFAULT_OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT_SECS", "300"))
 DEFAULT_OLLAMA_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "3"))
 DEFAULT_OLLAMA_RETRY_BACKOFF = float(os.getenv("OLLAMA_RETRY_BACKOFF_SECS", "2.0"))
-DEFAULT_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest")
+DEFAULT_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL") or "embeddinggemma:latest"
 DEFAULT_RETRIEVAL_MODE = os.getenv("DATASET_RETRIEVAL", "hybrid")
+DEFAULT_JUDGE_MODE = os.getenv("DATASET_JUDGE", "off")
+DEFAULT_JUDGE_MODEL = os.getenv("OLLAMA_JUDGE_MODEL") or DEFAULT_MODEL
 
 MIN_TOPIC_CONTEXT_CHARS = 9000
 VALID_TYPES: frozenset[str] = frozenset({"factual", "conceptual", "inference", "compare", "definition"})
 VALID_DIFFICULTIES: frozenset[str] = frozenset({"easy", "medium", "hard"})
 VALID_QUALITY_GATES: frozenset[str] = frozenset({"strict", "balanced", "off"})
+VALID_JUDGE_MODES: frozenset[str] = frozenset({"audit", "off"})
 
 STOPWORDS: frozenset[str] = frozenset({
     "cual", "como", "para", "este", "esta", "estos", "estas", "sobre",
