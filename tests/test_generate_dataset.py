@@ -346,7 +346,7 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
         existing_questions=[],
     )
     assert items[0]["context_source_verified"] is True
-    assert items[0]["context_source"] == "schedules processes"
+    assert items[0]["context_source"] == "The kernel schedules processes and allocates memory fairly."
     assert items[0]["document_language"] == "es"
     assert items[0]["difficulty"] == "hard"
     assert items[0]["source_chunk_ids"] == []
@@ -434,12 +434,18 @@ def test_context_excerpt_for_fragment_fallback_keeps_word_boundary():
     assert excerpt.split()[-1] == "alpha"
 
 
-def test_find_verified_context_source_truncates_on_word_boundary():
+def test_find_verified_context_source_expands_to_complete_sentence():
+    context = "Introductory note. The kernel schedules processes and allocates memory fairly. Final note."
+    source, verified = gd.find_verified_context_source("schedules processes", "It schedules processes.", context)
+    assert verified is True
+    assert source == "The kernel schedules processes and allocates memory fairly."
+
+
+def test_find_verified_context_source_keeps_long_literal_without_mid_word_cut():
     long_source = " ".join(["alpha"] * 80)
     source, verified = gd.find_verified_context_source(long_source, "alpha alpha alpha", long_source)
     assert verified is True
-    assert len(source) <= 300
-    assert source.split()[-1] == "alpha"
+    assert source == long_source
 
 
 def test_find_verified_context_source_cleans_html_breaks_from_source():
@@ -578,6 +584,11 @@ def test_apply_quality_gate_rejects_html_formula_noise():
         "In Figure , the paper compares six tasks.",
         "J?? controls the position of the chosen arm joints.",
         "The remaining ? = DoF coordinates are solved with IK.",
+        "The remaining ( DoF) coordinates are solved with IK.",
+        "The remaining \u2212 = DoF coordinates are solved with IK.",
+        "Fig. : reports the control ablation.",
+        "Figure : reports the control ablation.",
+        "The result is summarized in Figure 7.",
         "The answer contains a replacement character \ufffd.",
     ],
 )
@@ -605,6 +616,22 @@ def test_apply_quality_gate_rejects_compare_with_unsupported_answer_detail():
         "context_source_verified": True,
         "type": "compare",
         "topic": "Model comparison",
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "insufficient_context_support"
+    assert stats["rejection_reasons"] == {"insufficient_context_support": 1}
+
+
+def test_apply_quality_gate_rejects_factual_answer_with_unsupported_terms():
+    item = {
+        "id": "unsupported-factual",
+        "question": "What did the policy require?",
+        "answer": "The policy required encrypted cloud storage, biometric review, and monthly audits.",
+        "context_source": "The policy required encrypted cloud storage.",
+        "context_source_verified": True,
+        "type": "factual",
+        "topic": "Data governance",
     }
     accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
     assert accepted == []
@@ -673,6 +700,28 @@ def test_apply_quality_gate_rejects_truncated_context_source():
     assert rejected[0]["rejection_reason"] == "truncated_context_source"
 
 
+@pytest.mark.parametrize(
+    "context_source",
+    [
+        "ult, the joint space controller produced lower tracking error than the task-space controller.",
+        "The task-space controller produced lower tracking error by",
+        "The benchmark reports stronger performance across all tasks, offering",
+    ],
+)
+def test_apply_quality_gate_rejects_cut_context_boundaries(context_source):
+    item = {
+        "id": "cut-boundary",
+        "question": "What does the benchmark report?",
+        "answer": "The benchmark reports stronger performance.",
+        "context_source": context_source,
+        "context_source_verified": True,
+        "topic": "Robot learning",
+    }
+    accepted, rejected, _ = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "truncated_context_source"
+
+
 def test_apply_quality_gate_rejects_first_person_answer():
     item = {
         "id": "first-person",
@@ -704,20 +753,26 @@ def test_split_rows_spreads_small_splits_across_topics():
 
 
 def test_build_dataset_audit_reports_topic_and_split_warnings():
-    accepted = [{"topic_id": "topic-a"}, {"topic_id": "topic-a"}, {"topic_id": "topic-b"}]
-    rejected = [{"topic_id": "topic-c", "rejection_reason": "artifact_or_reference_noise"}]
+    # Keys are now composite "{document}::{topic_id}".
+    doc = "paper.pdf"
+    accepted = [
+        {"document": doc, "topic_id": "topic-a"},
+        {"document": doc, "topic_id": "topic-a"},
+        {"document": doc, "topic_id": "topic-b"},
+    ]
+    rejected = [{"document": doc, "topic_id": "topic-c", "rejection_reason": "artifact_or_reference_noise"}]
     audit = gd.build_dataset_audit(
         accepted,
         rejected,
         train_rows=accepted,
-        val_rows=[{"topic_id": "topic-a"}],
+        val_rows=[{"document": doc, "topic_id": "topic-a"}],
         test_rows=[],
         expected_topic_ids=["topic-a", "topic-b", "topic-c"],
     )
-    assert audit["accepted_by_topic"] == {"topic-a": 2, "topic-b": 1}
-    assert audit["rejected_by_topic"] == {"topic-c": 1}
-    assert audit["topics_without_accepted"] == ["topic-c"]
-    assert "topic-b" in audit["low_accepted_topics"]
+    assert audit["accepted_by_topic"] == {"paper.pdf::topic-a": 2, "paper.pdf::topic-b": 1}
+    assert audit["rejected_by_topic"] == {"paper.pdf::topic-c": 1}
+    assert audit["topics_without_accepted"] == ["paper.pdf::topic-c"]
+    assert "paper.pdf::topic-b" in audit["low_accepted_topics"]
     assert "val_split_has_single_topic" in audit["warnings"]
 
 
@@ -726,17 +781,58 @@ def test_build_dataset_audit_reports_topic_and_split_warnings():
 def test_normalize_judge_result_coerces_valid_public_fields():
     result = gd.normalize_judge_result(
         {
-            "score": "0.91",
+            "context_quality": "0.92",
+            "answer_support": 0.94,
+            "question_quality": 0.9,
+            "overall_score": "0.91",
             "decision": "PASS",
-            "reasons": ["Supported by context", "artifact/formula issue"],
+            "reasons": ["Supported by context"],
             "explanation": "The answer is supported by the cited source.",
         },
         model="judge-model",
     )
     assert result["judge_score"] == pytest.approx(0.91)
+    assert result["judge_context_quality"] == pytest.approx(0.92)
+    assert result["judge_answer_support"] == pytest.approx(0.94)
+    assert result["judge_question_quality"] == pytest.approx(0.9)
     assert result["judge_decision"] == "pass"
-    assert result["judge_reasons"] == ["factual", "extraction_artifact"]
+    assert result["judge_reasons"] == ["factual"]
     assert result["judge_model"] == "judge-model"
+
+
+@pytest.mark.parametrize("reason", ["weak_context", "unsupported_detail", "truncated_context", "extraction_artifact"])
+def test_normalize_judge_result_blocking_reasons_force_fail(reason):
+    result = gd.normalize_judge_result(
+        {
+            "context_quality": 0.95,
+            "answer_support": 0.95,
+            "question_quality": 0.95,
+            "overall_score": 0.95,
+            "decision": "pass",
+            "reasons": [reason],
+            "explanation": "The item has a blocking issue.",
+        },
+        model="judge-model",
+    )
+    assert result["judge_decision"] == "fail"
+    assert result["judge_score"] <= 0.35
+
+
+def test_normalize_judge_result_fails_low_component_score():
+    result = gd.normalize_judge_result(
+        {
+            "context_quality": 0.9,
+            "answer_support": 0.45,
+            "question_quality": 0.9,
+            "overall_score": 0.7,
+            "decision": "pass",
+            "reasons": ["factual"],
+            "explanation": "Answer support is too weak.",
+        },
+        model="judge-model",
+    )
+    assert result["judge_decision"] == "fail"
+    assert result["judge_score"] <= 0.39
 
 
 def test_judge_item_marks_review_on_invalid_judge_payload(monkeypatch):
@@ -759,8 +855,30 @@ def test_judge_item_marks_review_on_invalid_judge_payload(monkeypatch):
 
 def test_audit_items_with_judge_builds_stats(monkeypatch):
     responses = [
-        ({"score": 0.95, "decision": "pass", "reasons": ["factual"], "explanation": "ok"}, ""),
-        ({"score": 0.35, "decision": "fail", "reasons": ["unsupported detail"], "explanation": "bad"}, ""),
+        (
+            {
+                "context_quality": 0.9,
+                "answer_support": 1.0,
+                "question_quality": 0.95,
+                "overall_score": 0.95,
+                "decision": "pass",
+                "reasons": ["factual"],
+                "explanation": "ok",
+            },
+            "",
+        ),
+        (
+            {
+                "context_quality": 0.4,
+                "answer_support": 0.3,
+                "question_quality": 0.35,
+                "overall_score": 0.35,
+                "decision": "fail",
+                "reasons": ["unsupported detail"],
+                "explanation": "bad",
+            },
+            "",
+        ),
     ]
 
     def fake_call(**kw):  # noqa: ARG001
@@ -778,6 +896,9 @@ def test_audit_items_with_judge_builds_stats(monkeypatch):
     assert stats["judged_items"] == 2
     assert stats["decision_counts"] == {"fail": 1, "pass": 1}
     assert stats["average_score"] == pytest.approx(0.65)
+    assert stats["average_context_quality"] == pytest.approx(0.65)
+    assert stats["average_answer_support"] == pytest.approx(0.65)
+    assert stats["average_question_quality"] == pytest.approx(0.65)
     assert stats["reason_counts"] == {"factual": 1, "unsupported_detail": 1}
 
 
@@ -999,3 +1120,247 @@ def test_validate_args_rejects_empty_embedding_model_for_hybrid(tmp_path):
     )
     with pytest.raises(SystemExit):
         gd.validate_args(args)
+
+
+# =============================================================================
+# New tests: encoding normalisation, cross-chunk detection, judge pre-checks,
+# verbatim answer detection, and composite audit keys.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Group A — encoding
+# ---------------------------------------------------------------------------
+
+def test_normalize_encoding_fixes_mojibake_map_fallback(monkeypatch):
+    """normalize_encoding corrects apostrophe mojibake via the fallback map."""
+    monkeypatch.setattr("engine._text._FTFY_AVAILABLE", False)
+    # â€™ = U+00E2 + U+20AC + U+2122 (TM sign used as 0x99 in Windows-1252)
+    mojibake_apostrophe = "â€™"
+    dirty = f"The paper{mojibake_apostrophe}s findings"
+    result = gd.normalize_encoding(dirty)
+    assert mojibake_apostrophe not in result
+    assert "paper" in result  # surrounding text preserved
+
+
+def test_has_quality_artifact_rejects_mojibake_in_context_source():
+    """has_quality_artifact returns True for text containing the â€ mojibake prefix."""
+    # â€ = U+00E2 + U+20AC — the universal prefix for most mojibake sequences.
+    mojibake = "â€™"  # â€™ variant
+    item = {
+        "question": "What does the ratio measure?",
+        "answer": "Downside risk only.",
+        "context_source": f"The Sortino {mojibake}s formula penalises losses.",
+        "topic": "Risk",
+    }
+    assert gd.has_quality_artifact(item) is True
+
+
+def test_has_quality_artifact_clean_item_passes():
+    """has_quality_artifact returns False for clean ASCII/UTF-8 text."""
+    item = {
+        "question": "What is the Sharpe ratio?",
+        "answer": "A measure of risk-adjusted return.",
+        "context_source": "The Sharpe ratio divides excess return by the standard deviation.",
+        "topic": "Risk metrics",
+    }
+    assert gd.has_quality_artifact(item) is False
+
+
+# ---------------------------------------------------------------------------
+# Group B — cross-chunk detection
+# ---------------------------------------------------------------------------
+
+def test_has_quality_artifact_rejects_internal_chunk_marker():
+    """has_quality_artifact returns True when context_source has a chunk marker."""
+    item = {
+        "question": "q",
+        "answer": "a",
+        "context_source": "First sentence. [doc-chunk-0002] Second sentence from another chunk.",
+        "topic": "T",
+    }
+    assert gd.has_quality_artifact(item) is True
+
+
+def test_audit_item_quality_returns_cross_chunk_context():
+    """audit_item_quality returns 'cross_chunk_context' for marker inside context_source."""
+    item = {
+        "question": "q",
+        "answer": "a",
+        "context_source": "First. [paper-chunk-0003] Second.",
+        "context_source_verified": True,
+        "topic": "T",
+    }
+    reason = gd.audit_item_quality(item)
+    assert reason == "cross_chunk_context"
+
+
+def test_source_chunk_ids_for_fragment_detects_multispan():
+    """source_chunk_ids_for_fragment returns both chunk IDs when the fragment contains a marker.
+
+    Literal-substring search cannot cross a chunk marker unless the marker text is part of the
+    fragment itself (i.e. the LLM copied the marker into context_source).  That fragment is
+    already rejected by has_quality_artifact / cross_chunk_context, but the ID attribution must
+    still cover both chunks so rejected-row metadata is correct.
+    """
+    context = (
+        "[doc-chunk-0001] First chunk content. "
+        "[doc-chunk-0002] Second chunk content."
+    )
+    # Fragment that includes the marker spans both chunk ranges.
+    fragment = "First chunk content. [doc-chunk-0002] Second chunk content."
+    ids = gd.source_chunk_ids_for_fragment(context, fragment)
+    assert "doc-chunk-0001" in ids
+    assert "doc-chunk-0002" in ids
+
+
+def test_source_chunk_ids_for_fragment_single_chunk():
+    """source_chunk_ids_for_fragment returns one ID when fragment is in one chunk."""
+    context = (
+        "[doc-chunk-0001] First chunk content. "
+        "[doc-chunk-0002] Second chunk with risk metrics here."
+    )
+    fragment = "risk metrics"
+    ids = gd.source_chunk_ids_for_fragment(context, fragment)
+    assert ids == ["doc-chunk-0002"]
+
+
+# ---------------------------------------------------------------------------
+# Group C — judge pre-checks and threshold
+# ---------------------------------------------------------------------------
+
+def test_normalize_judge_result_min_score_threshold_is_0_6():
+    """answer_support = 0.55 (< 0.6) must force decision to fail."""
+    result = gd.normalize_judge_result(
+        {
+            "context_quality": 0.9,
+            "answer_support": 0.55,
+            "question_quality": 0.9,
+            "overall_score": 0.78,
+            "decision": "pass",
+            "reasons": ["factual"],
+            "explanation": "Borderline answer support.",
+        },
+        model="judge",
+    )
+    assert result["judge_decision"] == "fail"
+    assert result["judge_score"] <= 0.39
+
+
+def test_judge_item_precheck_fails_mojibake_without_llm_call(monkeypatch):
+    """A context_source with mojibake triggers fail in pre-checks without calling Ollama."""
+    llm_calls = {"n": 0}
+
+    def counting_fake_ollama(**kw):
+        llm_calls["n"] += 1
+        return ({}, "")
+
+    monkeypatch.setattr("engine._judge.call_ollama_json", counting_fake_ollama)
+    mojibake = "â€™"  # â€™
+    result = gd.judge_item(
+        {
+            "question": "What is measured?",
+            "answer": "Downside risk.",
+            "context_source": f"The ratio{mojibake}s approach penalises losses.",
+            "topic": "Risk",
+        },
+        model="judge-model",
+        temperature=0.0,
+    )
+    assert llm_calls["n"] == 0, "LLM should not be called when pre-check triggers"
+    assert result["judge_decision"] == "fail"
+    assert "extraction_artifact" in result["judge_reasons"]
+
+
+def test_judge_item_precheck_flags_internal_chunk_marker(monkeypatch):
+    """A chunk-boundary marker inside context_source causes judge pre-check to fail."""
+    monkeypatch.setattr("engine._judge.call_ollama_json", lambda **kw: ({}, ""))
+    result = gd.judge_item(
+        {
+            "question": "q",
+            "answer": "a",
+            "context_source": "Text. [doc-chunk-0002] More text from next chunk.",
+            "topic": "T",
+        },
+        model="judge-model",
+        temperature=0.0,
+    )
+    assert result["judge_decision"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Group D — verbatim answer detection
+# ---------------------------------------------------------------------------
+
+def test_has_verbatim_answer_detects_copy_paste():
+    """has_verbatim_answer returns True when answer nearly copies context_source."""
+    context = (
+        "The Sortino ratio focuses exclusively on downside deviation, "
+        "penalising only negative returns below a target threshold."
+    )
+    item = {
+        "question": "What does the Sortino ratio focus on?",
+        "answer": "The Sortino ratio focuses exclusively on downside deviation, "
+                  "penalising only negative returns below a target threshold.",
+        "context_source": context,
+    }
+    assert gd.has_verbatim_answer(item) is True
+
+
+def test_has_verbatim_answer_accepts_short_reformulated_answer():
+    """has_verbatim_answer returns False for a short reformulated answer."""
+    context = (
+        "These findings suggest that traditional technical indicators may have "
+        "diminishing predictive value in modern high-frequency markets."
+    )
+    item = {
+        "question": "What did findings suggest about traditional indicators?",
+        "answer": "They may lose predictive power in fast modern markets.",
+        "context_source": context,
+    }
+    assert gd.has_verbatim_answer(item) is False
+
+
+def test_apply_quality_gate_rejects_verbatim_answer():
+    """apply_quality_gate rejects a near-verbatim answer with 'verbatim_answer' reason."""
+    context = (
+        "Technical indicators such as Bollinger Bands provide dynamic support "
+        "and resistance levels that adapt to recent market volatility patterns."
+    )
+    item = {
+        "id": "verbatim-1",
+        "question": "What do Bollinger Bands provide?",
+        "answer": (
+            "Technical indicators such as Bollinger Bands provide dynamic support "
+            "and resistance levels that adapt to recent market volatility patterns."
+        ),
+        "context_source": context,
+        "context_source_verified": True,
+        "topic": "Technical Analysis",
+        "type": "factual",
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "verbatim_answer"
+
+
+# ---------------------------------------------------------------------------
+# Group E — composite audit keys
+# ---------------------------------------------------------------------------
+
+def test_build_dataset_audit_uses_doc_topic_composite_key():
+    """accepted_by_topic uses '{document}::{topic_id}' as key to prevent cross-doc collisions."""
+    accepted = [
+        {"document": "doc_a.pdf", "topic_id": "topic-00"},
+        {"document": "doc_b.pdf", "topic_id": "topic-00"},  # same topic_id, different doc
+    ]
+    audit = gd.build_dataset_audit(
+        accepted,
+        [],
+        train_rows=accepted,
+        val_rows=[],
+        test_rows=[],
+    )
+    assert "doc_a.pdf::topic-00" in audit["accepted_by_topic"]
+    assert "doc_b.pdf::topic-00" in audit["accepted_by_topic"]
+    assert audit["accepted_by_topic"]["doc_a.pdf::topic-00"] == 1
+    assert audit["accepted_by_topic"]["doc_b.pdf::topic-00"] == 1
