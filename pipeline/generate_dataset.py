@@ -21,6 +21,7 @@ Dependencies:
 # Re-export all public symbols from engine submodules so that callers and tests
 # can continue to use `import generate_dataset as gd; gd.Chunk`, `gd.parse_split`, etc.
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -172,6 +173,31 @@ from engine._topics import (  # noqa: F401
     topics_are_too_generic,
     topics_mostly_invalid,
 )
+
+
+def audit_items_with_judge_by_document(
+    items: list[dict[str, Any]],
+    model: str,
+    temperature: float,
+    seed: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Audit accepted rows one document at a time and aggregate judge stats."""
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in items:
+        groups[str(row.get("document", "__unknown__"))].append(row)
+
+    judged_rows: list[dict[str, Any]] = []
+    for document, document_items in groups.items():
+        print(f"[JUDGE] {document}: auditando {len(document_items)} item(s) con {model}...")
+        document_judged, _ = audit_items_with_judge(
+            document_items,
+            model=model,
+            temperature=temperature,
+            seed=seed,
+        )
+        judged_rows.extend(document_judged)
+
+    return judged_rows, build_judge_stats("audit", model, judged_rows)
 
 
 def main() -> None:
@@ -556,8 +582,7 @@ def main() -> None:
 
     judge_stats = build_judge_stats(getattr(args, "judge", "off"), args.judge_model, [])
     if getattr(args, "judge", "off") == "audit":
-        print(f"[JUDGE] Auditando {len(deduped)} item(s) finales con {args.judge_model}...")
-        judged_rows, judge_stats = audit_items_with_judge(
+        judged_rows, judge_stats = audit_items_with_judge_by_document(
             deduped,
             model=args.judge_model,
             temperature=0.0,
