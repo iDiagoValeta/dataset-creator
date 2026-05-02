@@ -66,34 +66,17 @@ def _normalized_terms(text: str) -> set[str]:
     return words | phrases
 
 
-def find_verified_context_source(raw_source: str, answer: str, topic_context: str) -> tuple[str, bool]:
-    """Find a literal context fragment that supports an answer."""
-    normalized_context = clean_context_artifacts(topic_context)
-    source = _truncate_excerpt(clean_context_artifacts(raw_source), 300)
+def find_verified_context_source(raw_source: str, answer: str, topic_context: str) -> tuple[str, bool]:  # noqa: ARG001
+    """Return a context fragment only when it is a literal source substring."""
+    normalized_context = normalize_whitespace(topic_context)
+    source = normalize_whitespace(str(raw_source))
+    if len(source) > 300:
+        partial = source[:300]
+        last_space = partial.rfind(" ")
+        source = partial[:last_space].rstrip(" ,;:") if last_space > 180 else partial.rstrip(" ,;:")
     if source and source.lower() in normalized_context.lower():
         start = normalized_context.lower().find(source.lower())
         return normalized_context[start : start + len(source)], True
-
-    answer_words = _content_words(answer)
-    if len(answer_words) < 3:
-        return "", False
-    answer_terms = set(answer_words)
-    best_sentence = ""
-    best_score = 0.0
-    for sentence in re.split(r"(?<=[.!?])\s+", normalized_context):
-        clean_sentence = sentence.strip()
-        if not (40 <= len(clean_sentence) <= 450):
-            continue
-        sentence_terms = set(_content_words(clean_sentence))
-        if not sentence_terms:
-            continue
-        score = len(answer_terms & sentence_terms) / max(1, len(answer_terms))
-        if score > best_score:
-            best_sentence = clean_sentence
-            best_score = score
-
-    if best_sentence and best_score >= 0.6:
-        return _truncate_excerpt(best_sentence, 300), True
     return "", False
 
 
@@ -195,6 +178,16 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
     if "forthcoming" in str(item.get("context_source", "")).lower():
         return True
     if re.search(r"\b\d{2,3}\s+(computer|medical|process|memory|device|system)\b", text):
+        return True
+    if "\ufffd" in text:
+        return True
+    if re.search(r"\bsection\s*\)", text):
+        return True
+    if re.search(r"\bfigure\s*,", text):
+        return True
+    if re.search(r"[a-z]\?{2,}", text):
+        return True
+    if re.search(r"\?\s*=\s*(?:dof|[a-z])\b", text):
         return True
     if str(item.get("topic", "")).strip().lower().endswith("references"):
         return True
@@ -320,6 +313,11 @@ def _semantic_terms(text: str) -> set[str]:
     return set(_content_words(text))
 
 
+def _answer_terms(text: str) -> set[str]:
+    """Content words used to catch duplicated answers with small punctuation drift."""
+    return set(_content_words(text))
+
+
 def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float = 0.85) -> list[dict[str, Any]]:
     """Drop exact and near-semantic duplicated questions."""
     seen_exact = set()
@@ -327,6 +325,7 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
     seen_bigrams: list[frozenset] = []
     seen_question_terms: list[set[str]] = []
     seen_qa_terms: list[set[str]] = []
+    seen_answer_terms: list[set[str]] = []
     unique: list[dict[str, Any]] = []
     for item in items:
         question = str(item.get("question", ""))
@@ -343,6 +342,7 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
         q_bigrams = _question_bigrams(question)
         q_terms = _semantic_terms(question)
         qa_terms = _semantic_terms(f"{question} {answer}")
+        answer_terms = _answer_terms(answer)
         duplicated_semantic = False
         if q_bigrams:
             for existing in seen_bigrams:
@@ -362,6 +362,11 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
                 if len(qa_terms & existing) / max(1, min(len(qa_terms), len(existing))) >= 0.8:
                     duplicated_semantic = True
                     break
+        if not duplicated_semantic and answer_terms:
+            for existing in seen_answer_terms:
+                if len(answer_terms & existing) / max(1, min(len(answer_terms), len(existing))) >= 0.78:
+                    duplicated_semantic = True
+                    break
         if duplicated_semantic:
             continue
 
@@ -371,6 +376,7 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
         seen_bigrams.append(q_bigrams)
         seen_question_terms.append(q_terms)
         seen_qa_terms.append(qa_terms)
+        seen_answer_terms.append(answer_terms)
         unique.append(item)
     return unique
 
