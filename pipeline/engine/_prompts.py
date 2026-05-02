@@ -143,24 +143,28 @@ Output format (strict JSON object):
       "answer": "string",
       "type": "factual|conceptual|inference|compare|definition",
       "difficulty": "easy|medium|hard",
-      "context_source": "verbatim fragment from topic context that directly supports the answer (max 350 chars)"
+      "context_source": "one to three complete sentences copied verbatim from topic context"
     }}
   ]
 }}
 
 Rules:
-- Questions must be answerable only from topic context.
+- Questions must be answerable only from the returned context_source.
 - Questions must cover different sub-points inside the same topic.
 - Use varied question openers; do not start more than two questions with the same first word.
 - Never repeat semantics from Existing dataset questions.
-- Answers must be argumentable: cite or paraphrase the specific passage that supports the answer.
-- Answers should be 2-4 sentences: state the claim, then explain the evidence from the text.
-- For compare or inference questions, context_source must include the full evidence needed for every claim in the answer.
+- Answers must be brief, natural, and strictly deducible from context_source.
+- Answers should be 1-2 sentences and must not introduce terms or claims absent from context_source.
+- For compare or inference questions, context_source must include the complete evidence needed for every claim in the answer.
 - If context lacks enough information for a question, skip that question - do not hallucinate.
 - Avoid asking about figures, images, or tables.
+- Avoid questions about mathematical notation or formulas when the extracted text is visually degraded.
+- Do not use context fragments that start mid-sentence or end mid-sentence.
 - Do not hallucinate details not present in context.
 - Do not include citations, markdown, or XML tags.
 - context_source must be a literal substring from topic context, not a paraphrase.
+- context_source must contain complete sentence(s), not a cut fragment.
+- Answers must reformulate evidence in your own words. Do not copy context_source verbatim. The answer must be a concise factual synthesis, not a direct quote.
 
 Question types:
 - factual: specific fact stated in the text
@@ -230,7 +234,7 @@ Output:
       "answer": "string",
       "type": "factual|conceptual|inference|compare|definition",
       "difficulty": "easy|medium|hard",
-      "context_source": "literal supporting fragment from context"
+      "context_source": "one to three complete sentences copied verbatim from context"
     }}
   ]
 }}
@@ -242,7 +246,11 @@ Constraints:
 - Questions must be distinct.
 - Use varied question openers.
 - Prefer balanced types with at least one factual, conceptual and inference.
+- Answers must be brief, natural, and strictly deducible from context_source.
 - For compare or inference questions, include all supporting evidence in context_source.
+- context_source must contain complete sentence(s), not a cut fragment.
+- Avoid figures, tables, images, broken formulas, and degraded mathematical notation.
+- Reformulate answers in your own words; do not copy context_source verbatim.
 
 Document: {document}
 Topic: {topic.name}
@@ -276,15 +284,18 @@ Output format (strict JSON object):
       "answer": "string",
       "type": "factual|conceptual|inference|compare|definition",
       "difficulty": "easy|medium|hard",
-      "context_source": "verbatim fragment from context that directly supports the answer (max 350 chars)"
+      "context_source": "one to three complete sentences copied verbatim from context"
     }}
   ]
 }}
 
 Rules:
-- answer must be grounded in the context; do not hallucinate.
+- answer must be brief, natural, and strictly deducible from context_source; do not hallucinate.
 - context_source must be a literal substring from context, not a paraphrase.
+- context_source must contain complete sentence(s), not a cut fragment.
+- Avoid figures, tables, images, broken formulas, and degraded mathematical notation.
 - If the context lacks enough information, answer from available text.
+- Reformulate the answer in your own words; do not copy context_source verbatim.
 
 Document: {document}
 Question: {question}
