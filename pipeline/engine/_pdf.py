@@ -5,7 +5,7 @@ from pathlib import Path
 from pypdf import PdfReader
 
 from engine._config import Chunk, logger
-from engine._text import clean_markdown_artifacts, normalize_whitespace
+from engine._text import clean_markdown_artifacts, normalize_encoding, normalize_whitespace
 
 try:
     import pymupdf4llm
@@ -19,7 +19,8 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
     """Extract text from a PDF, preferring pymupdf4llm when available."""
     if PYMUPDF_AVAILABLE:
         try:
-            return clean_markdown_artifacts(str(pymupdf4llm.to_markdown(str(pdf_path))))
+            raw = str(pymupdf4llm.to_markdown(str(pdf_path)))
+            return clean_markdown_artifacts(normalize_encoding(raw))
         except Exception as exc:
             logger.warning("Fallo pymupdf4llm en '%s': %s", pdf_path.name, exc)
 
@@ -39,7 +40,7 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
                 continue
             if page_text.strip():
                 texts.append(page_text)
-        return clean_markdown_artifacts("\n\n".join(texts))
+        return clean_markdown_artifacts(normalize_encoding("\n\n".join(texts)))
     except Exception as exc:
         logger.error("No se pudo extraer texto de '%s': %s", pdf_path.name, exc)
         return ""
