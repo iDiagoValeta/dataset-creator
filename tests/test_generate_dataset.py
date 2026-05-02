@@ -517,6 +517,33 @@ def test_infer_resume_counts_falls_back_to_checkpoint_items(tmp_path: Path):
     assert gd.infer_resume_counts(tmp_path, pdf, items) == (2, 2)
 
 
+def test_infer_resume_counts_recomputes_chunk_count_when_configured(tmp_path: Path, monkeypatch):
+    pdf = tmp_path / "Doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    items = [{"topic_id": "topic-00", "source_chunk_ids": ["doc-chunk-0001"]}]
+
+    monkeypatch.setattr(gd, "extract_text_from_pdf", lambda path: "alpha " * 200)
+
+    chunks = [
+        gd.Chunk(chunk_id=f"doc-chunk-{idx:04d}", document="Doc.pdf", text="alpha")
+        for idx in range(5)
+    ]
+
+    def fake_build_chunks(**kwargs):  # noqa: ARG001
+        return chunks
+
+    monkeypatch.setattr(gd, "build_chunks_from_text", fake_build_chunks)
+
+    assert gd.infer_resume_counts(
+        tmp_path,
+        pdf,
+        items,
+        chunk_size=3500,
+        chunk_overlap=350,
+        max_chunks=None,
+    ) == (5, 1)
+
+
 def test_context_source_falls_back_when_not_substring(monkeypatch):
     topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=[])
     context = "Pagination avoids fragmentation."
