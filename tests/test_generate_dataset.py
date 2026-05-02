@@ -35,6 +35,8 @@ def test_cli_defaults_use_hybrid_embeddinggemma_and_gemma4_e4b():
     assert args.model == "gemma4:e4b"
     assert args.embedding_model == "embeddinggemma:latest"
     assert args.retrieval == "hybrid"
+    assert args.judge == "off"
+    assert args.judge_model == "gemma4:e4b"
 
 
 # --- chunk_text -------------------------------------------------------
@@ -239,6 +241,20 @@ def test_deduplicate_items_drops_duplicate_answers():
     assert len(gd.deduplicate_items(items)) == 1
 
 
+def test_deduplicate_items_drops_near_duplicate_answers_with_punctuation_drift():
+    items = [
+        {
+            "question": "What action did Singapore take?",
+            "answer": "Singapore appended an additional section (Section ) to its guidance on software as a medical device (SaMD) (HSA), 2022.",
+        },
+        {
+            "question": "What guidance did Singapore append for SaMD?",
+            "answer": "Singapore, appended an additional section (Section ) to its guidance on software as a medical device (SaMD) (HSA), 2022 .",
+        },
+    ]
+    assert len(gd.deduplicate_items(items)) == 1
+
+
 def test_deduplicate_items_drops_cross_topic_semantic_duplicates():
     items = [
         {
@@ -374,7 +390,7 @@ def test_generated_item_excerpt_uses_verified_source_chunk(monkeypatch):
     assert items[0]["context_excerpt"].startswith("[doc-chunk-0001]")
 
 
-def test_find_verified_context_source_repairs_from_answer_overlap():
+def test_find_verified_context_source_does_not_repair_from_answer_overlap():
     context = (
         "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly. "
         "File systems store persistent data."
@@ -384,8 +400,8 @@ def test_find_verified_context_source_repairs_from_answer_overlap():
         "The kernel schedules processes and allocates memory fairly.",
         context,
     )
-    assert verified is True
-    assert source == "[doc-chunk-0001] The kernel schedules processes and allocates memory fairly."
+    assert verified is False
+    assert source == ""
 
 
 def test_context_excerpt_for_fragment_anchors_to_source_chunk():
@@ -433,9 +449,8 @@ def test_find_verified_context_source_cleans_html_breaks_from_source():
         "It focuses only on downside risk.",
         context,
     )
-    assert verified is True
-    assert "<br" not in source
-    assert "downside risk" in source
+    assert verified is False
+    assert source == ""
 
 
 def test_sample_existing_questions_respects_limit():
@@ -549,6 +564,31 @@ def test_apply_quality_gate_rejects_html_formula_noise():
         "answer": "The Sortino ratio focuses on downside risk.",
         "context_source": "Sortino ratio E Rp-Rf <br sd <br downside risk.",
         "topic": "Risk metrics",
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "artifact_or_reference_noise"
+    assert stats["rejection_reasons"] == {"artifact_or_reference_noise": 1}
+
+
+@pytest.mark.parametrize(
+    "bad_text",
+    [
+        "Singapore appended an additional section (Section ) to its guidance.",
+        "In Figure , the paper compares six tasks.",
+        "J?? controls the position of the chosen arm joints.",
+        "The remaining ? = DoF coordinates are solved with IK.",
+        "The answer contains a replacement character \ufffd.",
+    ],
+)
+def test_apply_quality_gate_rejects_broken_extraction_artifacts(bad_text):
+    item = {
+        "id": "broken-artifact",
+        "question": "What does the paper state?",
+        "answer": bad_text,
+        "context_source": bad_text,
+        "context_source_verified": True,
+        "topic": "Results",
     }
     accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
     assert accepted == []
@@ -679,6 +719,66 @@ def test_build_dataset_audit_reports_topic_and_split_warnings():
     assert audit["topics_without_accepted"] == ["topic-c"]
     assert "topic-b" in audit["low_accepted_topics"]
     assert "val_split_has_single_topic" in audit["warnings"]
+
+
+# --- judge audit ------------------------------------------------------
+
+def test_normalize_judge_result_coerces_valid_public_fields():
+    result = gd.normalize_judge_result(
+        {
+            "score": "0.91",
+            "decision": "PASS",
+            "reasons": ["Supported by context", "artifact/formula issue"],
+            "explanation": "The answer is supported by the cited source.",
+        },
+        model="judge-model",
+    )
+    assert result["judge_score"] == pytest.approx(0.91)
+    assert result["judge_decision"] == "pass"
+    assert result["judge_reasons"] == ["factual", "extraction_artifact"]
+    assert result["judge_model"] == "judge-model"
+
+
+def test_judge_item_marks_review_on_invalid_judge_payload(monkeypatch):
+    monkeypatch.setattr("engine._judge.call_ollama_json", lambda **kw: ({"items": []}, "not-json"))
+    judged = gd.judge_item(
+        {
+            "id": "qa-1",
+            "question": "What is supported?",
+            "answer": "A supported answer.",
+            "context_source": "A supported answer.",
+        },
+        model="judge-model",
+        temperature=0.0,
+        seed=42,
+    )
+    assert judged["judge_decision"] == "review"
+    assert judged["judge_reasons"] == ["judge_error"]
+    assert judged["judge_raw_content"] == "not-json"
+
+
+def test_audit_items_with_judge_builds_stats(monkeypatch):
+    responses = [
+        ({"score": 0.95, "decision": "pass", "reasons": ["factual"], "explanation": "ok"}, ""),
+        ({"score": 0.35, "decision": "fail", "reasons": ["unsupported detail"], "explanation": "bad"}, ""),
+    ]
+
+    def fake_call(**kw):  # noqa: ARG001
+        return responses.pop(0)
+
+    monkeypatch.setattr("engine._judge.call_ollama_json", fake_call)
+    items = [
+        {"id": "a", "question": "q1", "answer": "a1", "context_source": "a1"},
+        {"id": "b", "question": "q2", "answer": "a2", "context_source": "source"},
+    ]
+    judged, stats = gd.audit_items_with_judge(items, model="judge-model", temperature=0.0, seed=1)
+    assert [item["judge_decision"] for item in judged] == ["pass", "fail"]
+    assert stats["mode"] == "audit"
+    assert stats["model"] == "judge-model"
+    assert stats["judged_items"] == 2
+    assert stats["decision_counts"] == {"fail": 1, "pass": 1}
+    assert stats["average_score"] == pytest.approx(0.65)
+    assert stats["reason_counts"] == {"factual": 1, "unsupported_detail": 1}
 
 
 # --- cosine_similarity ------------------------------------------------
