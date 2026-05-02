@@ -42,6 +42,8 @@ from engine._config import (  # noqa: F401
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DEBUG_DIR,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_JUDGE_MODE,
+    DEFAULT_JUDGE_MODEL,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_DOC_CONTEXT_CHARS,
     DEFAULT_MAX_TOPIC_CONTEXT_CHARS,
@@ -63,6 +65,7 @@ from engine._config import (  # noqa: F401
     MIN_TOPIC_CONTEXT_CHARS,
     STOPWORDS,
     VALID_DIFFICULTIES,
+    VALID_JUDGE_MODES,
     VALID_QUALITY_GATES,
     VALID_TYPES,
     Chunk,
@@ -82,6 +85,16 @@ from engine._export import (  # noqa: F401
     write_metadata,
 )
 from engine._generation import generate_items_for_topic  # noqa: F401
+from engine._judge import (  # noqa: F401
+    KNOWN_JUDGE_REASONS,
+    VALID_JUDGE_DECISIONS,
+    audit_items_with_judge,
+    build_judge_messages,
+    build_judge_stats,
+    judge_error_result,
+    judge_item,
+    normalize_judge_result,
+)
 from engine._ollama import (  # noqa: F401
     _ollama_entry_model_name,
     _ollama_list_models_entries,
@@ -204,6 +217,8 @@ def main() -> None:
         verify_ollama_model(args.model)
         if getattr(args, "retrieval", "lexical") in {"semantic", "hybrid"}:
             verify_ollama_model(args.embedding_model)
+        if getattr(args, "judge", "off") == "audit":
+            verify_ollama_model(args.judge_model)
 
     args.debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -537,6 +552,17 @@ def main() -> None:
     write_jsonl(Path(f"{output_base}_test.jsonl"), test_rows)
     write_jsonl(Path(f"{output_base}.rejected.jsonl"), rejected_rows)
 
+    judge_stats = build_judge_stats(getattr(args, "judge", "off"), args.judge_model, [])
+    if getattr(args, "judge", "off") == "audit":
+        print(f"[JUDGE] Auditando {len(deduped)} item(s) finales con {args.judge_model}...")
+        judged_rows, judge_stats = audit_items_with_judge(
+            deduped,
+            model=args.judge_model,
+            temperature=0.0,
+            seed=args.seed,
+        )
+        write_jsonl(Path(f"{output_base}.judged.jsonl"), judged_rows)
+
     verified_count = sum(1 for item in deduped if item.get("context_source_verified"))
     metadata = {
         "created_at": now_iso(),
@@ -554,6 +580,7 @@ def main() -> None:
         "rejected_items": len(rejected_rows),
         "context_source_verified_items": verified_count,
         "quality": quality_stats,
+        "judge": judge_stats,
         "audit": dataset_audit,
         "resumed_documents": resumed_docs,
         "split": {"train": len(train_rows), "val": len(val_rows), "test": len(test_rows)},
@@ -571,6 +598,8 @@ def main() -> None:
             "resume": args.resume,
             "retrieval": args.retrieval,
             "embedding_model": args.embedding_model,
+            "judge": args.judge,
+            "judge_model": args.judge_model,
         },
         "runtime": build_reproducibility_info(),
     }
@@ -589,6 +618,8 @@ def main() -> None:
     print(f"- Items rechazados por quality gate: {len(rejected_rows)}")
     print(f"- Archivo principal: {args.output}")
     print(f"- Rechazados: {Path(f'{output_base}.rejected.jsonl')}")
+    if getattr(args, "judge", "off") == "audit":
+        print(f"- Auditados por juez: {Path(f'{output_base}.judged.jsonl')}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
     print(f"- context_source verificado (substring literal): {verified_count}/{len(deduped)}")
     if dataset_audit["warnings"]:
