@@ -136,6 +136,8 @@ The metadata file records:
 - topic coverage audit and warnings
 - runtime/package/git reproducibility info
 
+Per-document debug files in `pipeline/run_logs/*.json` include the detected language, topic-map attempts, `chunk_count`, topic contexts, raw generation attempts, and parsed topic/item payloads. `--resume` reuses these debug files plus `*.items.jsonl` checkpoints to preserve metadata counts without regenerating Q/A rows.
+
 ## User-Supplied Topics Or Questions
 
 Use `--topics-file` to bypass automatic topic mapping. The file can be YAML or plain text, one topic per line.
