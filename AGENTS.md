@@ -134,6 +134,8 @@ Each item includes `document_language` and `source_chunk_ids` in addition to the
 
 Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons, backfill count, accepted items before dedupe, verified items before dedupe, and duplicates removed after quality filtering. The `judge` block records mode, model, judged item count, decision counts, average score, average component scores (`context_quality`, `answer_support`, `question_quality`), and reason counts. The `audit` block records accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, low-coverage topics, and audit warnings.
 
+Per-document debug JSON files in `pipeline/run_logs` include language fields, topic-map attempts, `chunk_count`, topic records, raw generation attempts, and parsed payloads. Resume mode uses these debug files plus per-document `*.items.jsonl` checkpoints to infer `chunk_count` and `topic_count` in `dataset.meta.json` without regenerating the document.
+
 The standard output set includes:
 
 - `pipeline/output/dataset.jsonl`
