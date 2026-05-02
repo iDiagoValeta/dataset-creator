@@ -101,11 +101,6 @@ def build_judge_messages(item: dict[str, Any]) -> list[dict[str, str]]:
         "question": item.get("question", ""),
         "answer": item.get("answer", ""),
         "context_source": item.get("context_source", ""),
-        "context_excerpt": truncate_text(str(item.get("context_excerpt", "")), 1800),
-        "topic": item.get("topic", ""),
-        "type": item.get("type", ""),
-        "difficulty": item.get("difficulty", ""),
-        "document_language": item.get("document_language", ""),
     }
     return [
         {
@@ -220,6 +215,12 @@ def normalize_judge_result(payload: dict[str, Any], model: str) -> dict[str, Any
             reasons.append(normalized)
     if not reasons:
         reasons = ["factual"] if decision == "pass" else ["judge_error"]
+    if (
+        decision == "pass"
+        and min(context_quality, answer_support, question_quality) >= 0.8
+        and set(reasons).issubset({"factual", "judge_error", "weak_context"})
+    ):
+        reasons = ["factual"]
     if any(reason in BLOCKING_REASONS for reason in reasons):
         if decision in ("pass", "review"):
             decision = "fail"
