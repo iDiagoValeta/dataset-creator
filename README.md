@@ -56,7 +56,7 @@ examples/
   dataset.judged.jsonl   24 items with judge scores
 ```
 
-Generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, `--judge audit`, and English auto-detection. All 24 accepted items have verified literal context (`context_source_verified=true`), zero mojibake, zero cross-chunk contexts, and zero verbatim answers. The judge found 12 pass and 12 fail among the accepted rows.
+Generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, `--judge audit`, and English auto-detection. All 24 accepted items have verified literal context (`context_source_verified=true`), zero mojibake, zero cross-chunk contexts, and zero verbatim answers. The judge found 19 pass and 5 fail among the accepted rows, with zero `judge_error` rows.
 
 ## Common Commands
 

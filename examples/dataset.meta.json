@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-05-02T16:48:10.530611+00:00",
+  "created_at": "2026-05-02T18:32:23.382213+00:00",
   "model": "gemma4:e4b",
   "language": "auto",
   "document_languages": {
@@ -29,7 +29,6 @@
       "truncated_context_source": 12,
       "unverified_context_source": 4
     },
-    "backfill_generated_items": 4,
     "accepted_items_before_dedup": 34,
     "verified_items_before_dedup": 34,
     "duplicate_items_removed_after_quality": 10
@@ -39,19 +38,17 @@
     "model": "gemma4:e4b",
     "judged_items": 24,
     "decision_counts": {
-      "fail": 12,
-      "pass": 12
+      "fail": 5,
+      "pass": 19
     },
-    "average_score": 0.675,
+    "average_score": 0.8646,
     "average_context_quality": 0.9833,
-    "average_answer_support": 0.9833,
+    "average_answer_support": 0.9792,
     "average_question_quality": 0.95,
     "reason_counts": {
-      "factual": 3,
-      "judge_error": 9,
+      "factual": 19,
       "overly_extractive": 2,
-      "unsupported_detail": 2,
-      "weak_context": 8
+      "unsupported_detail": 3
     }
   },
   "audit": {
@@ -121,7 +118,7 @@
       "topics_below_2_items: carbon_footprint_ml_training.pdf::topic-01, global_ai_governance_healthcare.pdf::topic-01, redundancy_aware_robot_learning.pdf::topic-03"
     ]
   },
-  "resumed_documents": 0,
+  "resumed_documents": 3,
   "split": {
     "train": 19,
     "val": 2,
@@ -138,7 +135,7 @@
     "max_topic_context_chars": 24000,
     "quality_gate": "strict",
     "only_doc": null,
-    "resume": false,
+    "resume": true,
     "retrieval": "hybrid",
     "embedding_model": "embeddinggemma:latest",
     "judge": "audit",
@@ -152,6 +149,6 @@
       "pypdf": "6.10.2",
       "pymupdf4llm": "1.27.2.2"
     },
-    "git_commit": "2e12743"
+    "git_commit": "608098c"
   }
 }
