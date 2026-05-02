@@ -40,20 +40,23 @@ python pipeline/generate_dataset.py --clean; python pipeline/generate_dataset.py
 
 ## Example
 
-`examples/` contains a complete run for [arXiv 2412.15448](https://arxiv.org/abs/2412.15448), a paper about Random Forest models in high-frequency trading.
+`examples/` contains a complete run over three arXiv papers on ML carbon footprint, AI governance in healthcare, and redundancy-aware robot learning.
 
 ```text
 examples/
-  2412.15448v2.pdf       source PDF
-  dataset.jsonl          21 accepted QA items
-  dataset_train.jsonl    16 train items
+  carbon_footprint_ml_training.pdf      source PDF 1
+  global_ai_governance_healthcare.pdf   source PDF 2
+  redundancy_aware_robot_learning.pdf   source PDF 3
+  dataset.jsonl          24 accepted QA items
+  dataset_train.jsonl    19 train items
   dataset_val.jsonl       2 validation items
   dataset_test.jsonl      3 test items
   dataset.meta.json      run metadata, quality stats, audit stats
-  dataset.rejected.jsonl 11 rejected items
+  dataset.rejected.jsonl 48 rejected items
+  dataset.judged.jsonl   24 items with judge scores
 ```
 
-The example was generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, and English auto-detection. All 21 accepted items have verified source context and the audit block reports no warnings.
+Generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, `--judge audit`, and English auto-detection. All 24 accepted items have verified literal context (`context_source_verified=true`), zero mojibake, zero cross-chunk contexts, and zero verbatim answers. The judge found 12 pass and 12 fail among the accepted rows.
 
 ## Common Commands
 
