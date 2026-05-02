@@ -82,6 +82,7 @@ python pipeline/generate_dataset.py --retrieval hybrid --embedding-model nomic-e
 
 # Factuality judge audit (does not filter dataset.jsonl)
 python pipeline/generate_dataset.py --judge audit
+python pipeline/generate_dataset.py --quality-gate strict --judge audit
 python pipeline/generate_dataset.py --judge audit --judge-model llama3.1:8b
 
 # Resume or estimate
@@ -123,7 +124,7 @@ The deterministic quality gate also rejects:
 - **Verbatim answers** (`verbatim_answer`) — answers with ≥ 75 % bigram overlap with `context_source` and length comparable to the context (a proxy for copy-paste without reformulation).
 - Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, and answers that add too many unsupported content terms for RAG-style factual rows.
 
-`--judge audit` runs an Ollama judge after quality filtering and deduplication. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`, `weak_context`) force a `fail` decision regardless of the LLM score. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
+`--judge audit` runs an Ollama judge after quality filtering and deduplication. It audits accepted rows one document at a time for clearer progress and smaller judge batches, then writes one combined `dataset.judged.jsonl`. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force a `fail` decision regardless of the LLM score. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
 
 The metadata file records:
 
