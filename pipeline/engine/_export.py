@@ -86,29 +86,37 @@ def build_dataset_audit(
     min_items_per_topic: int = 2,
 ) -> dict[str, Any]:
     """Build lightweight quality and coverage audit metrics for metadata."""
-    expected = list(dict.fromkeys(str(t) for t in (expected_topic_ids or []) if t))
+    # Use composite keys "{document}::{topic_id}" so that the same topic_id in different
+    # documents does not collapse into a single counter entry.
+    def _composite_key(row: dict[str, Any]) -> str:
+        doc = str(row.get("document", "__missing__"))
+        tid = str(row.get("topic_id", "__missing__"))
+        return f"{doc}::{tid}"
+
     accepted_by_topic: dict[str, int] = {}
     rejected_by_topic: dict[str, int] = {}
     split_by_topic = {"train": {}, "val": {}, "test": {}}
 
     for row in accepted_rows:
-        topic_id = str(row.get("topic_id", "__missing__"))
-        accepted_by_topic[topic_id] = accepted_by_topic.get(topic_id, 0) + 1
+        key = _composite_key(row)
+        accepted_by_topic[key] = accepted_by_topic.get(key, 0) + 1
     for row in rejected_rows:
-        topic_id = str(row.get("topic_id", "__missing__"))
-        rejected_by_topic[topic_id] = rejected_by_topic.get(topic_id, 0) + 1
+        key = _composite_key(row)
+        rejected_by_topic[key] = rejected_by_topic.get(key, 0) + 1
     for split_name, rows_for_split in (("train", train_rows), ("val", val_rows), ("test", test_rows)):
         for row in rows_for_split:
-            topic_id = str(row.get("topic_id", "__missing__"))
+            key = _composite_key(row)
             bucket = split_by_topic[split_name]
-            bucket[topic_id] = bucket.get(topic_id, 0) + 1
+            bucket[key] = bucket.get(key, 0) + 1
 
-    all_topics = sorted(set(expected) | set(accepted_by_topic) | set(rejected_by_topic))
-    topics_without_accepted = [topic_id for topic_id in all_topics if accepted_by_topic.get(topic_id, 0) == 0]
+    # Derive all_topics from actual rows; expected_topic_ids (bare IDs) are not composite-aware
+    # so they are omitted from the key space to avoid false mismatches.
+    all_topics = sorted(set(accepted_by_topic) | set(rejected_by_topic))
+    topics_without_accepted = [key for key in all_topics if accepted_by_topic.get(key, 0) == 0]
     low_accepted_topics = [
-        topic_id
-        for topic_id in all_topics
-        if 0 < accepted_by_topic.get(topic_id, 0) < min_items_per_topic
+        key
+        for key in all_topics
+        if 0 < accepted_by_topic.get(key, 0) < min_items_per_topic
     ]
 
     warnings: list[str] = []
