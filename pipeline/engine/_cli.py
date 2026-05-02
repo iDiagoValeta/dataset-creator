@@ -11,6 +11,8 @@ from engine._config import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DEBUG_DIR,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_JUDGE_MODE,
+    DEFAULT_JUDGE_MODEL,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_DOC_CONTEXT_CHARS,
     DEFAULT_MAX_TOPIC_CONTEXT_CHARS,
@@ -24,6 +26,7 @@ from engine._config import (
     DEFAULT_SOURCE_DIR,
     DEFAULT_SPLIT,
     DEFAULT_TEMPERATURE,
+    VALID_JUDGE_MODES,
     VALID_QUALITY_GATES,
     Topic,
     logger,
@@ -142,6 +145,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EMBEDDING_MODEL,
         help="Modelo Ollama para embeddings (con --retrieval semantic o hybrid). Default: embeddinggemma:latest.",
     )
+    parser.add_argument(
+        "--judge",
+        choices=sorted(VALID_JUDGE_MODES),
+        default=DEFAULT_JUDGE_MODE,
+        help="Audit final accepted QA items with an Ollama judge. Default: off.",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default=DEFAULT_JUDGE_MODEL,
+        help="Ollama model used by --judge audit. Default: gemma4:e4b.",
+    )
     g = parser.add_argument_group("User-supplied topics / questions")
     g.add_argument(
         "--topics-file",
@@ -189,6 +204,11 @@ def validate_args(args: argparse.Namespace) -> None:
         args, "embedding_model", ""
     ).strip():
         errors.append("--embedding-model no puede estar vacío cuando --retrieval es 'semantic' o 'hybrid'")
+
+    if getattr(args, "judge", "off") not in VALID_JUDGE_MODES:
+        errors.append(f"--judge debe ser uno de {sorted(VALID_JUDGE_MODES)}, recibido: {args.judge}")
+    if getattr(args, "judge", "off") == "audit" and not getattr(args, "judge_model", "").strip():
+        errors.append("--judge-model no puede estar vacio cuando --judge es 'audit'")
 
     if errors:
         for err in errors:
