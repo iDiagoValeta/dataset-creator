@@ -20,6 +20,7 @@ Dependencies:
 
 # Re-export all public symbols from engine submodules so that callers and tests
 # can continue to use `import generate_dataset as gd; gd.Chunk`, `gd.parse_split`, etc.
+import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -200,6 +201,42 @@ def audit_items_with_judge_by_document(
     return judged_rows, build_judge_stats("audit", model, judged_rows)
 
 
+def infer_resume_counts(
+    debug_dir: Path,
+    pdf_path: Path,
+    checkpoint_items: list[dict[str, Any]],
+) -> tuple[int, int]:
+    """Infer chunk/topic counts from per-document debug metadata during resume."""
+    debug_path = debug_dir / f"{pdf_path.stem}.json"
+    debug_payload: dict[str, Any] = {}
+    if debug_path.exists():
+        try:
+            debug_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            debug_payload = {}
+
+    chunk_count = int(debug_payload.get("chunk_count") or 0)
+    if chunk_count <= 0:
+        chunk_ids = {
+            str(chunk_id)
+            for item in checkpoint_items
+            for chunk_id in item.get("source_chunk_ids", [])
+            if str(chunk_id).strip()
+        }
+        chunk_count = len(chunk_ids)
+
+    debug_topics = debug_payload.get("topics", [])
+    topic_count = len(debug_topics) if isinstance(debug_topics, list) else 0
+    if topic_count <= 0:
+        topic_count = len({
+            str(item.get("topic_id", ""))
+            for item in checkpoint_items
+            if str(item.get("topic_id", "")).strip()
+        })
+
+    return chunk_count, topic_count
+
+
 def main() -> None:
     """Run end-to-end dataset generation pipeline."""
     start_time = time.time()
@@ -266,6 +303,9 @@ def main() -> None:
                 generated.extend(cached)
                 cached_language = str(cached[0].get("document_language", "unknown"))
                 document_languages[pdf_path.name] = cached_language
+                resumed_chunk_count, resumed_topic_count = infer_resume_counts(args.debug_dir, pdf_path, cached)
+                total_chunks += resumed_chunk_count
+                total_topics += resumed_topic_count
                 resumed_docs += 1
                 print(f"  - Resume: {len(cached)} items cargados desde checkpoint; salto generacion.")
                 continue
@@ -299,6 +339,7 @@ def main() -> None:
                 "language": document_language,
                 "language_prompt": generation_language,
                 "language_scores": language_scores,
+                "chunk_count": len(chunks),
                 "topic_map_strategy": "user_file",
                 "topic_map_payload": {
                     "topics": [
@@ -330,6 +371,7 @@ def main() -> None:
                 "language": document_language,
                 "language_prompt": generation_language,
                 "language_scores": language_scores,
+                "chunk_count": len(chunks),
                 "topic_map_payload": topics_payload,
                 "topic_map_raw_content": topics_raw_content,
                 "topic_map_strategy": "llm",
