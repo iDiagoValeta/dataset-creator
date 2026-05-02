@@ -205,6 +205,9 @@ def infer_resume_counts(
     debug_dir: Path,
     pdf_path: Path,
     checkpoint_items: list[dict[str, Any]],
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+    max_chunks: int | None = None,
 ) -> tuple[int, int]:
     """Infer chunk/topic counts from per-document debug metadata during resume."""
     debug_path = debug_dir / f"{pdf_path.stem}.json"
@@ -217,13 +220,26 @@ def infer_resume_counts(
 
     chunk_count = int(debug_payload.get("chunk_count") or 0)
     if chunk_count <= 0:
-        chunk_ids = {
-            str(chunk_id)
-            for item in checkpoint_items
-            for chunk_id in item.get("source_chunk_ids", [])
-            if str(chunk_id).strip()
-        }
-        chunk_count = len(chunk_ids)
+        if chunk_size is not None and chunk_overlap is not None:
+            raw_text = extract_text_from_pdf(pdf_path)
+            chunk_count = len(
+                build_chunks_from_text(
+                    raw_text=raw_text,
+                    document_name=pdf_path.name,
+                    document_stem=pdf_path.stem,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    max_chunks=max_chunks,
+                )
+            )
+        else:
+            chunk_ids = {
+                str(chunk_id)
+                for item in checkpoint_items
+                for chunk_id in item.get("source_chunk_ids", [])
+                if str(chunk_id).strip()
+            }
+            chunk_count = len(chunk_ids)
 
     debug_topics = debug_payload.get("topics", [])
     topic_count = len(debug_topics) if isinstance(debug_topics, list) else 0
@@ -303,7 +319,14 @@ def main() -> None:
                 generated.extend(cached)
                 cached_language = str(cached[0].get("document_language", "unknown"))
                 document_languages[pdf_path.name] = cached_language
-                resumed_chunk_count, resumed_topic_count = infer_resume_counts(args.debug_dir, pdf_path, cached)
+                resumed_chunk_count, resumed_topic_count = infer_resume_counts(
+                    args.debug_dir,
+                    pdf_path,
+                    cached,
+                    chunk_size=args.chunk_size,
+                    chunk_overlap=args.chunk_overlap,
+                    max_chunks=args.max_chunks,
+                )
                 total_chunks += resumed_chunk_count
                 total_topics += resumed_topic_count
                 resumed_docs += 1
