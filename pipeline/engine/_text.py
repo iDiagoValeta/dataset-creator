@@ -9,6 +9,115 @@ from datetime import datetime, timezone
 
 from engine._config import LANGUAGE_MARKERS, LANGUAGE_NAMES, STOPWORDS
 
+try:
+    import ftfy as _ftfy
+
+    _FTFY_AVAILABLE = True
+except ImportError:
+    _FTFY_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Encoding normalisation (mojibake fix)
+# ---------------------------------------------------------------------------
+# When pymupdf4llm reads PDFs whose internal fonts encode text as Windows-1252
+# but do not declare the encoding, the raw bytes are returned without conversion.
+# pymupdf4llm writes them as a UTF-8 markdown string, producing double-encoded
+# sequences known as "mojibake".  For example, U+2013 EN DASH (UTF-8: E2 80 93)
+# whose bytes are then read as three Windows-1252 codepoints:
+#   0xE2 -> U+00E2 (â), 0x80 -> U+20AC (€), 0x93 -> U+201C (")
+# so the en-dash appears as the three-char sequence "â€“".
+#
+# All characters below are spelled out as \u escapes to avoid any source-file
+# encoding ambiguity — Python 3 always treats \u escapes as exact codepoints.
+
+_MOJIBAKE_MAP: list[tuple[str, str]] = [
+    # ---- Dashes ----
+    # EN DASH U+2013: UTF-8 E2 80 93 -> Win-1252: 0xE2=U+00E2, 0x80=U+20AC, 0x93=U+201C
+    ("â€“", "–"),   # â€" -> en-dash  (0x93=left-dbl-quote in Win-1252)
+    # EM DASH U+2014: UTF-8 E2 80 94 -> Win-1252: 0x94=U+201D
+    ("â€”", "—"),   # â€" -> em-dash
+    # ---- Directional double quotes ----
+    # LEFT U+201C: UTF-8 E2 80 9C -> Win-1252: 0x9C=U+0153
+    ("â€œ", "“"),   # â€œ -> left double quote
+    # RIGHT U+201D: UTF-8 E2 80 9D -> Win-1252: 0x9D=U+017D
+    ("â€Ž", "”"),   # â€ -> right double quote
+    # ---- Directional single quotes ----
+    # LEFT U+2018: UTF-8 E2 80 98 -> Win-1252: 0x98=U+02DC (small tilde)
+    ("â€˜", "‘"),   # â€˜ -> left single quote
+    # RIGHT U+2019 / APOSTROPHE: UTF-8 E2 80 99 -> Win-1252: 0x99=U+2122 (trade mark)
+    ("â€™", "’"),   # â€™ -> right single quote / apostrophe
+    # ---- Greek letters (UTF-8 2-byte sequences read as Latin-1) ----
+    # theta U+03B8: UTF-8 CE B8 -> 0xCE=U+00CE (Î), 0xB8=U+00B8 (¸)
+    ("Î¸", "θ"),         # Î¸ -> theta
+    # alpha U+03B1: UTF-8 CE B1 -> 0xB1=U+00B1 (±)
+    ("Î±", "α"),         # Î± -> alpha
+    # beta U+03B2: UTF-8 CE B2 -> 0xB2=U+00B2 (²)
+    ("Î²", "β"),         # Î² -> beta
+    # gamma U+03B3: UTF-8 CE B3 -> 0xB3=U+00B3 (³)
+    ("Î³", "γ"),         # Î³ -> gamma
+    # delta U+03B4: UTF-8 CE B4 -> 0xB4=U+00B4 (´)
+    ("Î´", "δ"),         # Î´ -> delta
+    # sigma U+03C3: UTF-8 CF 83 -> 0xCF=U+00CF (Ï), 0x83=U+0192 (ƒ)
+    ("Ïƒ", "σ"),         # Ïƒ -> sigma
+    # mu U+03BC: UTF-8 CE BC -> 0xBC=U+00BC (¼)
+    ("Î¼", "μ"),         # Î¼ -> mu
+    # lambda U+03BB: UTF-8 CE BB -> 0xBB=U+00BB (»)
+    ("Î»", "λ"),         # Î» -> lambda
+    # ---- Math symbols (UTF-8 3-byte sequences read as Latin-1/Win-1252) ----
+    # ELEMENT OF U+2208: UTF-8 E2 88 88 -> 0x88=U+02C6 (ˆ)
+    ("âˆˆ", "∈"),   # âˆˆ -> element-of (∈)
+    # N-ARY SUMMATION U+2211: UTF-8 E2 88 91 -> 0x91=U+2018 (left single quote)
+    ("âˆ‘", "∑"),   # âˆ' -> summation (∑)
+    # SQUARE ROOT U+221A: UTF-8 E2 88 9A -> 0x9A=U+0161 (s with caron)
+    ("âˆš", "√"),   # âˆš -> square root (√)
+    # LESS-THAN-OR-EQUAL U+2264: UTF-8 E2 89 A4 -> 0x89=U+2030 (‰), 0xA4=U+00A4 (¤)
+    ("â‰¤", "≤"),   # â‰¤ -> ≤
+    # GREATER-THAN-OR-EQUAL U+2265: UTF-8 E2 89 A5 -> 0xA5=U+00A5 (¥)
+    ("â‰¥", "≥"),   # â‰¥ -> ≥
+    # PLUS-MINUS U+00B1: UTF-8 C2 B1 -> 0xC2=U+00C2 (Â), 0xB1=U+00B1 (±)
+    ("Â±", "±"),         # Â± -> ±
+    # MIDDLE DOT U+00B7: UTF-8 C2 B7 -> 0xB7=U+00B7 (·)
+    ("Â·", "·"),         # Â· -> middle dot
+    # ---- Whitespace ----
+    ("\xa0", " "),   # NO-BREAK SPACE -> regular space
+    ("\x00", ""),    # NULL byte -> remove
+]
+
+# Pattern to detect surviving mojibake as a quality-gate safety net.
+# The sequence U+00E2 U+20AC is the universal mojibake prefix for anything
+# whose UTF-8 starts with E2 80 xx (covers dashes, quotes, bullets, etc.).
+# U+00CE followed by common bytes covers Greek letter mojibake.
+# All written as \u escapes to avoid source-encoding ambiguity.
+MOJIBAKE_PATTERN = re.compile(
+    "â€"               # â€ prefix (covers â€™ â€" â€" etc.)
+    "|Î[¸±²³´µ¼»]"  # Î¸ Î± Î² etc.
+    "|Ïƒ"              # Ïƒ (sigma mojibake)
+    "|âˆˆ"        # âˆˆ (element-of mojibake)
+    "|Ã¢"              # Ã¢ (another common prefix)
+)
+
+
+def normalize_encoding(text: str) -> str:
+    """Fix double-encoded UTF-8 (mojibake) on raw extracted PDF text.
+
+    Uses ftfy when installed; falls back to a curated replacement map.
+    Call this on raw text *before* any chunking or markdown cleaning so that
+    downstream checks receive clean Unicode.
+    """
+    if _FTFY_AVAILABLE:
+        return _ftfy.fix_text(text)
+    cleaned = text
+    for bad, good in _MOJIBAKE_MAP:
+        cleaned = cleaned.replace(bad, good)
+    # Strip ASCII control characters except tab (0x09) and newlines (0x0A, 0x0D).
+    cleaned = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", cleaned)
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Remaining utilities (unchanged from original)
+# ---------------------------------------------------------------------------
+
 
 def parse_split(split_text: str) -> tuple[float, float, float]:
     """Parse and validate split ratios in 'train,val,test' format."""
@@ -171,12 +280,12 @@ def detect_document_language(text: str) -> tuple[str, str, dict[str, int]]:
         for code, markers in LANGUAGE_MARKERS.items()
     }
 
-    if "ñ" in sample or "¿" in sample or "¡" in sample:
+    if "ñ" in sample or "¿" in sample or "¡" in sample:  # ñ ¿ ¡
         scores["es"] += 8
-    if any(token in sample for token in (" l'", " d'", " qu'", "à", "è", "ç")):
+    if any(token in sample for token in (" l'", " d'", " qu'", "à", "è", "ç")):  # à è ç
         scores["fr"] += 4
         scores["ca"] += 2
-    if any(token in sample for token in ("ção", "ões", "ã", "õ")):
+    if any(token in sample for token in ("ção", "ões", "ã", "õ")):  # ção ões ã õ
         scores["pt"] += 6
 
     best_code = max(scores, key=scores.get) if scores else "en"
