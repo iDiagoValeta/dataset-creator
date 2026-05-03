@@ -281,6 +281,16 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
     # A marker in the interior means the fragment crosses chunk boundaries.
     if re.search(r"\[[\w.-]+-chunk-\d{4,}\]", str(item.get("context_source", ""))):
         return True
+    # Dangling section letters at the end ("... C.") indicate a section header
+    # was glued to the extracted source. Trigger on a single-letter sentence
+    # following at least one full sentence, which is the shape extraction
+    # leaves behind when a heading is tacked on.
+    for field in ("context_source", "context_excerpt"):
+        text_field = normalize_whitespace(str(item.get(field, "")))
+        if not text_field or len(text_field) < 20:
+            continue
+        if re.search(r"\b[A-Z]\.\s*$", text_field) and re.search(r"\.\s+[A-Z]\.\s*$", text_field):
+            return True
     return False
 
 
@@ -364,6 +374,151 @@ def _topic_alignment_terms(item: dict[str, Any]) -> set[str]:
         for term in _normalized_terms(topic_text)
         if term not in _GENERIC_TOPIC_TERMS and len(term) >= 4
     }
+
+
+def _topic_alignment_terms_from_topic(topic: dict[str, Any]) -> set[str]:
+    """Like ``_topic_alignment_terms`` but accepts a Topic-shaped dict directly."""
+    topic_text = " ".join(
+        [
+            str(topic.get("name", "")),
+            str(topic.get("summary", "")),
+            " ".join(str(k) for k in topic.get("keywords", []) if k),
+        ]
+    )
+    return {
+        term
+        for term in _normalized_terms(topic_text)
+        if term not in _GENERIC_TOPIC_TERMS and len(term) >= 4
+    }
+
+
+def score_item_against_topic(item: dict[str, Any], topic: dict[str, Any]) -> float:
+    """Return a coarse alignment score between an item and a candidate topic.
+
+    Combines term overlap (alignment terms ∩ item content terms), keyword
+    overlap, and a small bonus when the topic name appears in the question
+    or answer. The score is comparable across sibling topics of the same
+    document but not normalized globally.
+    """
+    topic_terms = _topic_alignment_terms_from_topic(topic)
+    if not topic_terms:
+        return 0.0
+    item_terms = _normalized_terms(
+        " ".join(str(item.get(key, "")) for key in ("question", "answer", "context_source"))
+    )
+    if not item_terms:
+        return 0.0
+
+    overlap = topic_terms & item_terms
+    score = float(len(overlap))
+
+    keyword_terms = {
+        str(k).strip().lower()
+        for k in topic.get("keywords", [])
+        if str(k).strip()
+    }
+    if keyword_terms:
+        item_text = " ".join(
+            str(item.get(key, "")) for key in ("question", "answer", "context_source")
+        ).lower()
+        kw_hits = sum(1 for kw in keyword_terms if kw and kw in item_text)
+        score += 0.5 * kw_hits
+
+    name = str(topic.get("name", "")).strip().lower()
+    if name and len(name) >= 5:
+        qa_text = " ".join(
+            str(item.get(key, "")) for key in ("question", "answer")
+        ).lower()
+        if name in qa_text:
+            score += 1.0
+    return score
+
+
+def reassign_or_reject_topic(
+    item: dict[str, Any],
+    candidate_topics: Sequence[dict[str, Any]],
+    margin: float = 1.5,
+    min_match_score: float = 1.0,
+) -> tuple[dict[str, Any], str | None]:
+    """Move an item to a better-fitting topic from the same document, or reject.
+
+    Returns a tuple ``(possibly_updated_item, action)`` where ``action`` is one
+    of: ``None`` (item kept as-is), ``"reassigned"`` (item moved to a stronger
+    topic), or ``"topic_mismatch_reassign"`` (no candidate had enough overlap).
+
+    ``margin`` is the minimum score advantage that another topic needs over the
+    current one to trigger a reassignment. ``min_match_score`` is the floor for
+    the best candidate; below it the item is rejected.
+    """
+    if not candidate_topics:
+        return item, None
+
+    current_topic_id = str(item.get("topic_id", ""))
+    scored: list[tuple[float, dict[str, Any]]] = [
+        (score_item_against_topic(item, topic), topic) for topic in candidate_topics
+    ]
+    if not scored:
+        return item, None
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    best_score, best_topic = scored[0]
+
+    if best_score < min_match_score:
+        return item, "topic_mismatch_reassign"
+
+    current_score = next(
+        (score for score, topic in scored if str(topic.get("topic_id", "")) == current_topic_id),
+        None,
+    )
+
+    if current_score is not None and (best_score - current_score) < margin:
+        return item, None
+
+    if str(best_topic.get("topic_id", "")) == current_topic_id:
+        return item, None
+
+    updated = dict(item)
+    updated["reassigned_from"] = {
+        "topic_id": current_topic_id,
+        "topic": str(item.get("topic", "")),
+    }
+    updated["topic_id"] = str(best_topic.get("topic_id", ""))
+    updated["topic"] = str(best_topic.get("name", ""))
+    updated["topic_summary"] = str(best_topic.get("summary", ""))
+    updated["topic_keywords"] = list(best_topic.get("keywords", []))
+    return updated, "reassigned"
+
+
+def apply_topic_reassignment(
+    items: Sequence[dict[str, Any]],
+    topics_by_document: dict[str, Sequence[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    """Apply ``reassign_or_reject_topic`` over a stream of items.
+
+    Returns ``(kept_items, rejected_items, stats)``. Items rejected here carry
+    ``rejection_reason="topic_mismatch_reassign"``; the dedicated reason makes
+    it visible in ``quality.rejection_reasons`` separately from the
+    deterministic ``topic_mismatch`` rule.
+    """
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    stats = {"reassigned": 0, "rejected_no_match": 0, "kept_as_is": 0}
+    for item in items:
+        document = str(item.get("document", ""))
+        candidates = list(topics_by_document.get(document, []))
+        updated, action = reassign_or_reject_topic(item, candidates)
+        if action == "topic_mismatch_reassign":
+            row = dict(updated)
+            row["rejection_reason"] = "topic_mismatch_reassign"
+            rejected.append(row)
+            stats["rejected_no_match"] += 1
+            continue
+        if action == "reassigned":
+            stats["reassigned"] += 1
+        else:
+            stats["kept_as_is"] += 1
+        kept.append(updated)
+    return kept, rejected, stats
 
 
 def has_topic_mismatch(item: dict[str, Any]) -> bool:
@@ -482,8 +637,21 @@ def _answer_terms(text: str) -> set[str]:
     return set(_content_words(text))
 
 
-def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float = 0.85) -> list[dict[str, Any]]:
-    """Drop exact and near-semantic duplicated questions."""
+def deduplicate_items(
+    items: Iterable[dict[str, Any]],
+    semantic_threshold: float = 0.78,
+    return_stats: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, int]]:
+    """Drop exact and near-semantic duplicated questions.
+
+    When ``return_stats=True`` returns ``(unique, breakdown)`` where
+    ``breakdown`` distinguishes ``duplicate_exact``,
+    ``duplicate_semantic_question``, ``duplicate_semantic_qa`` and
+    ``duplicate_semantic_answer`` counts. The exact-question and
+    duplicate-answer-string checks are reported under
+    ``duplicate_exact`` and ``duplicate_semantic_answer`` respectively
+    so the totals match the historical aggregate.
+    """
     seen_exact = set()
     seen_answers = set()
     seen_bigrams: list[frozenset] = []
@@ -491,47 +659,57 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
     seen_qa_terms: list[set[str]] = []
     seen_answer_terms: list[set[str]] = []
     unique: list[dict[str, Any]] = []
+    breakdown = {
+        "duplicate_exact": 0,
+        "duplicate_semantic_question": 0,
+        "duplicate_semantic_qa": 0,
+        "duplicate_semantic_answer": 0,
+    }
     for item in items:
         question = str(item.get("question", ""))
         answer = str(item.get("answer", ""))
         signature = sanitize_question(question)
         answer_signature = sanitize_question(answer)
-        if (
-            not signature
-            or signature in seen_exact
-            or (len(answer_signature) >= 12 and answer_signature in seen_answers)
-        ):
+        if not signature:
+            breakdown["duplicate_exact"] += 1
+            continue
+        if signature in seen_exact:
+            breakdown["duplicate_exact"] += 1
+            continue
+        if len(answer_signature) >= 12 and answer_signature in seen_answers:
+            breakdown["duplicate_semantic_answer"] += 1
             continue
 
         q_bigrams = _question_bigrams(question)
         q_terms = _semantic_terms(question)
         qa_terms = _semantic_terms(f"{question} {answer}")
         answer_terms = _answer_terms(answer)
-        duplicated_semantic = False
+        duplicated_reason: str | None = None
         if q_bigrams:
             for existing in seen_bigrams:
                 if not existing:
                     continue
                 overlap = len(q_bigrams & existing) / min(len(q_bigrams), len(existing))
                 if overlap >= semantic_threshold:
-                    duplicated_semantic = True
+                    duplicated_reason = "duplicate_semantic_question"
                     break
-        if not duplicated_semantic and q_terms:
+        if duplicated_reason is None and q_terms:
             for existing in seen_question_terms:
                 if len(q_terms & existing) / max(1, min(len(q_terms), len(existing))) >= 0.75:
-                    duplicated_semantic = True
+                    duplicated_reason = "duplicate_semantic_question"
                     break
-        if not duplicated_semantic and qa_terms:
+        if duplicated_reason is None and qa_terms:
             for existing in seen_qa_terms:
                 if len(qa_terms & existing) / max(1, min(len(qa_terms), len(existing))) >= 0.8:
-                    duplicated_semantic = True
+                    duplicated_reason = "duplicate_semantic_qa"
                     break
-        if not duplicated_semantic and answer_terms:
+        if duplicated_reason is None and answer_terms:
             for existing in seen_answer_terms:
                 if len(answer_terms & existing) / max(1, min(len(answer_terms), len(existing))) >= 0.78:
-                    duplicated_semantic = True
+                    duplicated_reason = "duplicate_semantic_answer"
                     break
-        if duplicated_semantic:
+        if duplicated_reason is not None:
+            breakdown[duplicated_reason] += 1
             continue
 
         seen_exact.add(signature)
@@ -542,6 +720,8 @@ def deduplicate_items(items: Iterable[dict[str, Any]], semantic_threshold: float
         seen_qa_terms.append(qa_terms)
         seen_answer_terms.append(answer_terms)
         unique.append(item)
+    if return_stats:
+        return unique, breakdown
     return unique
 
 
