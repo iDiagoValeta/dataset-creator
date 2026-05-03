@@ -42,7 +42,7 @@ pipeline/
     _ollama.py           <- Ollama client wrapper
     _topics.py           <- topic parsing, validation, retrieval
     _quality.py          <- quality gate and deduplication
-    _judge.py            <- optional factuality judge audit
+    _judge.py            <- optional factuality judge audit/filter
     _generation.py       <- QA generation per topic
     _export.py           <- JSONL I/O, splits, metadata
     _cli.py              <- argparse, validation, dry-run
@@ -78,7 +78,7 @@ pyproject.toml
 7. Apply the quality gate before deduplication. In `strict` mode, keep only clean items with verified source context, topic alignment, and enough source support; write rejected rows to `dataset.rejected.jsonl`.
 8. Backfill topics with fewer than 2 accepted rows, then rerun quality filtering.
 9. Deduplicate accepted items (exact + semantic via bigrams, including duplicate answers).
-10. Optionally run `--judge audit` over final accepted rows, grouped by document for progress and smaller judge batches, and write one combined `dataset.judged.jsonl` without changing `dataset.jsonl`.
+10. Optionally run `--judge audit` over final accepted rows, grouped by document for progress and smaller judge batches, and write one combined `dataset.judged.jsonl` without changing `dataset.jsonl`; or run `--judge filter` to remove judge `review`/`fail` rows from the final dataset and append them to rejected rows.
 11. Export the main JSONL and topic-aware train/val/test splits.
 12. Persist metadata, audit stats, per-document/topic run logs, plus per-document checkpoints for `--resume`.
 
@@ -86,14 +86,15 @@ pyproject.toml
 
 | Variable | Default | Usage |
 |---|---|---|
+| `OLLAMA_CONTEXT_LENGTH` | `32768` | Recommended Ollama server context window for long-document topic mapping; restart Ollama after changing it |
 | `OLLAMA_DATASET_MODEL` | `gemma4:e4b` | Primary generator model |
 | `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout |
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
 | `OLLAMA_EMBEDDING_MODEL` | `embeddinggemma:latest` | Ollama model for semantic/hybrid embeddings |
-| `OLLAMA_JUDGE_MODEL` | `gemma4:e4b` | Ollama model for `--judge audit` |
+| `OLLAMA_JUDGE_MODEL` | `gemma4:e4b` | Ollama model for `--judge audit` / `--judge filter` |
 | `DATASET_RETRIEVAL` | `hybrid` | Chunk retrieval mode (`lexical`, `semantic`, or `hybrid`) |
-| `DATASET_JUDGE` | `off` | Judge mode (`off` or `audit`) |
+| `DATASET_JUDGE` | `off` | Judge mode (`off`, `audit`, or `filter`) |
 | `DATASET_LOG_LEVEL` | `INFO` | Logging level (`DEBUG/INFO/WARNING/ERROR`) |
 | `DATASET_LANGUAGE` | `auto` | Detect language per PDF; use `es`, `en`, `ca`, etc. to force output |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size |
@@ -113,10 +114,10 @@ pyproject.toml
 - `--language <code>` forces one language for all PDFs.
 - `--quality-gate strict|balanced|off` controls final dataset filtering. Default `strict` rejects unverified items, circular answers, common extraction artifacts, truncated context sources, first-person paper voice, clear topic mismatches, insufficiently supported factual/definition/compare/inference answers, cross-chunk contexts, and verbatim answers; rejected rows are written to `dataset.rejected.jsonl`.
 - `context_source_verified=true` means `context_source` is a literal substring of the extracted document context after whitespace normalization. Do not infer or repair source context from answer overlap; this project is primarily for RAG-style triples where the answer must be deducible from literal source context. Verified context should be expanded to complete sentence-bounded evidence when possible, not clipped to arbitrary 300-character fragments.
-- Deterministic quality checks in `strict` mode also reject: **mojibake** (double-encoded UTF-8 sequences such as `â€™` or `Î¸`) detected in any Q/A field; **cross-chunk context** (`cross_chunk_context`) where `context_source` contains an internal chunk marker; and **verbatim answers** (`verbatim_answer`) with ≥ 75 % bigram overlap with `context_source` and comparable length. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback. Chunk markers are stripped from all generated text before quality checks.
+- Deterministic quality checks in `strict` mode also reject: **mojibake** (double-encoded UTF-8 sequences such as `â€™` or `Î¸`) detected in any Q/A field; **cross-chunk context** (`cross_chunk_context`) where `context_source` contains an internal chunk marker; and **verbatim answers** (`verbatim_answer`) with >= 70 % answer-bigram overlap with `context_source`, including short copied evidence phrases. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback. Chunk markers are stripped from all generated text before quality checks.
 - `balanced` keeps unverified context sources but still applies deterministic quality checks and circular-answer filtering.
-- `--judge off|audit` controls optional LLM factuality auditing after quality filtering and deduplication. Default `off` keeps current cost and output behavior.
-- `--judge-model MODEL` sets the Ollama model used by `--judge audit`. Defaults to `OLLAMA_JUDGE_MODEL`, whose default is `gemma4:e4b`.
+- `--judge off|audit|filter` controls optional LLM factuality auditing after quality filtering and deduplication. Default `off` keeps current cost and output behavior. `audit` writes judge scores without changing `dataset.jsonl`; `filter` keeps only `judge_decision=pass` rows in `dataset.jsonl` and moves `review`/`fail` rows to `dataset.rejected.jsonl` with `rejection_reason="judge_fail:<reason>"`.
+- `--judge-model MODEL` sets the Ollama model used by `--judge audit` or `--judge filter`. Defaults to `OLLAMA_JUDGE_MODEL`, whose default is `gemma4:e4b`.
 - The judge audits accepted rows one document at a time, then writes one combined `dataset.judged.jsonl`. It applies deterministic pre-checks (mojibake, internal chunk markers, near-verbatim answers) before calling the LLM. Blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force `fail` regardless of LLM output. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing component score (context quality, answer support, question quality) is 0.6. Topic audit keys in `dataset.meta.json` use composite `"{document}::{topic_id}"` format to prevent cross-document collisions.
 - `--retrieval lexical|semantic|hybrid` selects the chunk retrieval strategy for topic context building. Default `hybrid` combines lexical scoring and Ollama embeddings; embeddings are cached per chunk within a document. Requires the embedding model to be available in Ollama.
 - `--embedding-model MODEL` sets the Ollama model used for embeddings when `--retrieval semantic` or `--retrieval hybrid`. Defaults to `embeddinggemma:latest`.
@@ -128,11 +129,11 @@ pyproject.toml
 
 ## 8. Output schema and metadata notes
 
-Each item includes `document_language` and `source_chunk_ids` in addition to the QA fields, topic fields, source document, timestamps, and context traceability. The core RAG triple is `question`, literal `context_source`, and `answer`; the answer should be factually deducible from that context alone. When `--judge audit` is enabled, `dataset.judged.jsonl` adds `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision` (`pass`, `review`, or `fail`), `judge_reasons`, `judge_explanation`, and `judge_model` to each accepted item.
+Each item includes `document_language` and `source_chunk_ids` in addition to the QA fields, topic fields, source document, timestamps, and context traceability. The core RAG triple is `question`, literal `context_source`, and `answer`; the answer should be factually deducible from that context alone. When `--judge audit` or `--judge filter` is enabled, `dataset.judged.jsonl` adds `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision` (`pass`, `review`, or `fail`), `judge_reasons`, `judge_explanation`, and `judge_model` to each accepted item before optional judge filtering.
 
 `dataset.meta.json` includes `document_languages`, a mapping from PDF filename to the detected or forced language, plus counts, params, split sizes, runtime info, judge stats, audit stats, and reproducibility metadata.
 
-Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons, backfill count, accepted items before dedupe, verified items before dedupe, and duplicates removed after quality filtering. The `judge` block records mode, model, judged item count, decision counts, average score, average component scores (`context_quality`, `answer_support`, `question_quality`), and reason counts. The `audit` block records accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, low-coverage topics, and audit warnings.
+Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons, backfill count, accepted items before dedupe, verified items before dedupe, duplicates removed after quality filtering, and when `--judge filter` is active, `judge_filtered_items` plus `final_items_after_judge`. The `judge` block records mode, model, judged item count, decision counts, average score, average component scores (`context_quality`, `answer_support`, `question_quality`), and reason counts. The `audit` block records accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, low-coverage topics, and audit warnings.
 
 Per-document debug JSON files in `pipeline/run_logs` include language fields, topic-map attempts, `chunk_count`, topic records, raw generation attempts, and parsed payloads. Resume mode uses these debug files plus per-document `*.items.jsonl` checkpoints to infer `chunk_count` and `topic_count` in `dataset.meta.json` without regenerating the document.
 
@@ -144,4 +145,4 @@ The standard output set includes:
 - `pipeline/output/dataset_test.jsonl`
 - `pipeline/output/dataset.meta.json`
 - `pipeline/output/dataset.rejected.jsonl`
-- `pipeline/output/dataset.judged.jsonl` (only with `--judge audit`)
+- `pipeline/output/dataset.judged.jsonl` (only with `--judge audit` or `--judge filter`)
