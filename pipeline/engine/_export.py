@@ -109,9 +109,14 @@ def build_dataset_audit(
             bucket = split_by_topic[split_name]
             bucket[key] = bucket.get(key, 0) + 1
 
-    # Derive all_topics from actual rows; expected_topic_ids (bare IDs) are not composite-aware
-    # so they are omitted from the key space to avoid false mismatches.
-    all_topics = sorted(set(accepted_by_topic) | set(rejected_by_topic))
+    expected_topic_keys = {
+        str(topic_id)
+        for topic_id in (expected_topic_ids or [])
+        if "::" in str(topic_id)
+    }
+    # Bare expected_topic_ids are not composite-aware, so only explicit
+    # "{document}::{topic_id}" values are added to the key space.
+    all_topics = sorted(set(accepted_by_topic) | set(rejected_by_topic) | expected_topic_keys)
     topics_without_accepted = [key for key in all_topics if accepted_by_topic.get(key, 0) == 0]
     low_accepted_topics = [
         key
