@@ -124,6 +124,17 @@ def build_dataset_audit(
         if 0 < accepted_by_topic.get(key, 0) < min_items_per_topic
     ]
 
+    coverage_total = len(all_topics)
+    topics_with_accepted = coverage_total - len(topics_without_accepted)
+    coverage_ratio = (
+        round(topics_with_accepted / coverage_total, 4) if coverage_total else 0.0
+    )
+
+    multi_doc_in_splits = {}
+    for split_name, rows_for_split in (("train", train_rows), ("val", val_rows), ("test", test_rows)):
+        documents = {str(row.get("document", "")) for row in rows_for_split if row.get("document")}
+        multi_doc_in_splits[split_name] = len(documents) > 1
+
     warnings: list[str] = []
     if topics_without_accepted:
         warnings.append(f"topics_without_accepted: {', '.join(topics_without_accepted)}")
@@ -133,12 +144,20 @@ def build_dataset_audit(
         if rows_for_split and len(split_by_topic[split_name]) == 1 and len(all_topics) > 1:
             warnings.append(f"{split_name}_split_has_single_topic")
 
+    pipeline_success = (
+        coverage_total > 0
+        and len(topics_without_accepted) <= max(1, coverage_total // 5)
+    )
+
     return {
         "accepted_by_topic": accepted_by_topic,
         "rejected_by_topic": rejected_by_topic,
         "split_by_topic": split_by_topic,
         "topics_without_accepted": topics_without_accepted,
         "low_accepted_topics": low_accepted_topics,
+        "coverage_ratio": coverage_ratio,
+        "multi_doc_in_splits": multi_doc_in_splits,
+        "pipeline_success": pipeline_success,
         "warnings": warnings,
     }
 
