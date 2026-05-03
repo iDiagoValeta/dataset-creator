@@ -8,7 +8,7 @@ I needed high-quality QA datasets for my own projects, especially in **Spanish (
 
 This repository automates that workflow end-to-end: extract text from PDFs, detect the document language, map topics, generate grounded QA pairs with a local Ollama model, deduplicate, and export ready-to-train JSONL splits, all while keeping traceability back to the source context.
 
-The pipeline extracts text, detects the document language, maps topics, generates grounded Q/A pairs, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset, while `--judge filter` removes judge failures from the final JSONL.
+The pipeline extracts text, detects the document language, maps topics, selects literal evidence windows from each PDF, generates Q/A pairs from those fixed windows, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset, while `--judge filter` removes judge failures from the final JSONL.
 
 ## Quick Start
 
@@ -129,14 +129,19 @@ python pipeline/generate_dataset.py --clean
 
 ## Quality And Metadata
 
-`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for factual/definition/compare/inference answers. `context_source_verified=true` means the context is a literal substring of the extracted document context after whitespace normalization; the pipeline does not infer or repair source context from answer overlap. Verified context is expanded to complete sentence-bounded evidence when possible, so RAG rows favor complete literal support instead of clipped 300-character fragments. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
+Generation is evidence-first by default. For each topic, the code extracts and ranks 1-3 sentence evidence windows from the retrieved topic context, preserving the source chunk ID. Ollama receives one fixed evidence passage at a time and returns only `question`, `answer`, `type`, and `difficulty`; the pipeline assigns `context_source` from the selected literal evidence and sets `context_source_verified=true` by construction. If the answer is copied too closely, circular, or insufficiently supported, the pipeline can retry the same evidence with repair feedback before moving to another evidence window.
+
+`strict` mode keeps only rows with verified `context_source`, non-circular answers, clean extracted text, topic alignment, and enough support for factual/definition/compare/inference answers. `context_source_verified=true` means the context is a literal substring of the extracted document context after whitespace normalization; the pipeline does not infer or repair source context from answer overlap. Rejected rows are written to `dataset.rejected.jsonl` with a `rejection_reason`.
 
 The deterministic quality gate also rejects:
 
 - **Mojibake** — double-encoded UTF-8 sequences (e.g. `â€™`, `Î¸`) in any Q/A field. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback.
 - **Cross-chunk context** (`cross_chunk_context`) — `context_source` that contains an internal chunk marker, meaning the LLM copied text spanning two source chunks. Markers are also stripped from generated text before quality checks.
 - **Verbatim answers** (`verbatim_answer`) — answers with >= 70 % answer-bigram overlap with `context_source`, including short copied evidence phrases.
-- Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, and answers that add too many unsupported content terms for RAG-style factual rows.
+- **Topic mismatch on reassignment** (`topic_mismatch_reassign`) — items whose question/answer/context do not match any topic discovered in the same document. Items that match a different topic better than the one they were generated under are reassigned (a `reassigned_from` field is added to track the move).
+- Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, dangling section letters at the end (e.g. trailing `... C.`), and answers that add too many unsupported content terms for RAG-style factual rows.
+
+Topic-aware retrieval penalizes chunks that overlap with sibling topics in the same document, and the literal-name match heuristic only triggers when the topic name appears in at most two contiguous chunks. Backfill for under-covered topics targets `--questions-per-topic` accepted rows and requires at least two final rows per topic for coverage. It first tries unused evidence windows from the primary topic context; the second attempt regenerates the topic context with an alternative retrieval strategy and excludes chunks already used. Topics that still fall short of two accepted items are recorded in `quality.unfillable_topics`.
 
 `--judge audit` runs an Ollama judge after quality filtering and deduplication. It audits accepted rows one document at a time for clearer progress and smaller judge batches, then writes one combined `dataset.judged.jsonl`. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force a `fail` decision regardless of the LLM score. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`.
 
@@ -146,13 +151,15 @@ The metadata file records:
 
 - generation counts and split sizes
 - detected document languages
-- quality gate stats and rejection reasons
+- quality gate stats and rejection reasons (including `topic_mismatch_reassign`)
 - judge stats when enabled, including overall and component score averages
-- deduplication counts
-- topic coverage audit and warnings
+- deduplication counts plus `quality.dedup_breakdown` separating exact, semantic-question, semantic-QA, and semantic-answer duplicates
+- evidence-first counters under `quality.evidence_first`: `candidate_windows`, `attempted_windows`, `accepted_from_evidence`, `repair_attempts`, `discarded_windows`, and `evidence_exhausted_topics`
+- `quality.topic_reassignments` (counts of items kept, reassigned, or rejected by topic reassignment) and `quality.unfillable_topics` (list of topics that did not reach the per-topic minimum after backfill attempts)
+- topic coverage audit and warnings, plus `audit.coverage_ratio`, `audit.multi_doc_in_splits`, and `audit.pipeline_success`
 - runtime/package/git reproducibility info
 
-Per-document debug files in `pipeline/run_logs/*.json` include the detected language, topic-map attempts, `chunk_count`, topic contexts, raw generation attempts, and parsed topic/item payloads. `--resume` reuses these debug files plus `*.items.jsonl` checkpoints to preserve metadata counts without regenerating Q/A rows.
+Per-document debug files in `pipeline/run_logs/*.json` include the detected language, topic-map attempts, `chunk_count`, topic contexts, selected evidence windows, raw generation attempts, and parsed topic/item payloads. `--resume` reuses these debug files plus `*.items.jsonl` checkpoints to preserve metadata counts without regenerating Q/A rows.
 
 ## User-Supplied Topics Or Questions
 
@@ -178,7 +185,7 @@ Each JSONL row contains:
 ```text
 id, question, answer, type, difficulty,
 context_source, context_source_verified, context_excerpt,
-topic, topic_id, topic_keywords,
+topic, topic_id, topic_keywords, reassigned_from (optional),
 document, document_language, source_chunk_ids, created_at
 ```
 
