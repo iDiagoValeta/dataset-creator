@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-05-03T11:00:23.543023+00:00",
+  "created_at": "2026-05-03T20:15:36.408409+00:00",
   "model": "gemma4:e4b",
   "language": "auto",
   "document_languages": {
@@ -11,147 +11,452 @@
   "output": "C:\\Users\\nadiv\\repos\\dataset-creator\\pipeline\\output\\dataset.jsonl",
   "pdf_count": 3,
   "chunk_count": 25,
-  "topic_count": 23,
-  "generated_items": 189,
-  "deduplicated_items": 20,
-  "accepted_items": 20,
-  "rejected_items": 161,
-  "context_source_verified_items": 20,
+  "topic_count": 24,
+  "generated_items": 158,
+  "deduplicated_items": 98,
+  "accepted_items": 83,
+  "rejected_items": 15,
+  "context_source_verified_items": 83,
   "quality": {
     "gate": "strict",
-    "accepted_items": 20,
-    "rejected_items": 157,
-    "verified_items": 20,
+    "accepted_items": 83,
+    "rejected_items": 15,
+    "verified_items": 83,
     "verified_ratio": 1.0,
-    "rejection_reasons": {
-      "artifact_or_reference_noise": 11,
-      "unverified_context_source": 4,
-      "truncated_context_source": 23,
-      "insufficient_context_support": 48,
-      "verbatim_answer": 17,
-      "topic_mismatch": 53,
-      "circular_answer": 1
+    "rejection_reasons": {},
+    "topic_reassignments": {
+      "reassigned": 34,
+      "rejected_no_match": 0,
+      "kept_as_is": 124
     },
-    "backfill_generated_items": 51,
-    "accepted_items_before_dedup": 32,
-    "verified_items_before_dedup": 32,
-    "duplicate_items_removed_after_quality": 8,
-    "judge_filtered_items": 4,
-    "final_items_after_judge": 20
+    "backfill_generated_items": 24,
+    "backfill_attempts": [
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-01",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 3,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 20,
+          "accepted_from_evidence": 3,
+          "repair_attempts": 36,
+          "discarded_windows": 208,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-01",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 0,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 0,
+          "repair_attempts": 32,
+          "discarded_windows": 225,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-02",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 6,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 28,
+          "accepted_from_evidence": 6,
+          "repair_attempts": 48,
+          "discarded_windows": 211,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-02",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 4,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 6,
+          "discarded_windows": 220,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-03",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 3,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 4,
+          "discarded_windows": 176,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-04",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 0,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 0,
+          "repair_attempts": 32,
+          "discarded_windows": 204,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-04",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 0,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 0,
+          "repair_attempts": 32,
+          "discarded_windows": 223,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "carbon_footprint_ml_training.pdf::topic-07",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 6,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 10,
+          "discarded_windows": 179,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "global_ai_governance_healthcare.pdf::topic-05",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 2,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 5,
+          "accepted_from_evidence": 2,
+          "repair_attempts": 8,
+          "discarded_windows": 43,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "global_ai_governance_healthcare.pdf::topic-05",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 3,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 4,
+          "discarded_windows": 47,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "global_ai_governance_healthcare.pdf::topic-07",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 7,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 12,
+          "discarded_windows": 48,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-02",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 2,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 8,
+          "accepted_from_evidence": 2,
+          "repair_attempts": 14,
+          "discarded_windows": 145,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-04",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 2,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 3,
+          "discarded_windows": 135,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-04",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 63,
+          "attempted_windows": 3,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 4,
+          "discarded_windows": 14,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-05",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 30,
+          "discarded_windows": 151,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-05",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 0,
+        "evidence_first": {
+          "candidate_windows": 63,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 0,
+          "repair_attempts": 32,
+          "discarded_windows": 28,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-06",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 1,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 1,
+          "discarded_windows": 124,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-06",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 0,
+        "evidence_first": {
+          "candidate_windows": 46,
+          "attempted_windows": 16,
+          "accepted_from_evidence": 0,
+          "repair_attempts": 32,
+          "discarded_windows": 27,
+          "evidence_exhausted_topics": 1
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-07",
+        "attempt": 1,
+        "strategy": "primary",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 80,
+          "attempted_windows": 1,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 0,
+          "discarded_windows": 100,
+          "evidence_exhausted_topics": 0
+        }
+      },
+      {
+        "topic_key": "redundancy_aware_robot_learning.pdf::topic-07",
+        "attempt": 2,
+        "strategy": "alt:semantic",
+        "generated": 1,
+        "evidence_first": {
+          "candidate_windows": 53,
+          "attempted_windows": 7,
+          "accepted_from_evidence": 1,
+          "repair_attempts": 13,
+          "discarded_windows": 34,
+          "evidence_exhausted_topics": 0
+        }
+      }
+    ],
+    "unfillable_topics": [],
+    "evidence_first": {
+      "candidate_windows": 3425,
+      "attempted_windows": 705,
+      "accepted_from_evidence": 158,
+      "repair_attempts": 1176,
+      "discarded_windows": 5257,
+      "evidence_exhausted_topics": 12
+    },
+    "accepted_items_before_dedup": 158,
+    "verified_items_before_dedup": 158,
+    "duplicate_items_removed_after_quality": 60,
+    "dedup_breakdown": {
+      "duplicate_exact": 0,
+      "duplicate_semantic_question": 31,
+      "duplicate_semantic_qa": 13,
+      "duplicate_semantic_answer": 16
+    },
+    "judge_filtered_items": 15,
+    "final_items_after_judge": 83
   },
   "judge": {
     "mode": "filter",
     "model": "gemma4:e4b",
-    "judged_items": 24,
+    "judged_items": 98,
     "decision_counts": {
-      "fail": 4,
-      "pass": 20
+      "fail": 15,
+      "pass": 83
     },
-    "average_score": 0.8917,
+    "average_score": 0.9005,
     "average_context_quality": 1.0,
-    "average_answer_support": 0.9833,
+    "average_answer_support": 0.9827,
     "average_question_quality": 1.0,
     "reason_counts": {
-      "factual": 20,
-      "unsupported_detail": 4
+      "factual": 83,
+      "unsupported_detail": 15
     }
   },
   "audit": {
     "accepted_by_topic": {
-      "carbon_footprint_ml_training.pdf::topic-00": 2,
+      "carbon_footprint_ml_training.pdf::topic-00": 3,
       "carbon_footprint_ml_training.pdf::topic-01": 3,
-      "carbon_footprint_ml_training.pdf::topic-06": 1,
-      "global_ai_governance_healthcare.pdf::topic-00": 2,
-      "global_ai_governance_healthcare.pdf::topic-01": 1,
-      "global_ai_governance_healthcare.pdf::topic-03": 1,
-      "global_ai_governance_healthcare.pdf::topic-06": 1,
-      "global_ai_governance_healthcare.pdf::topic-07": 1,
-      "redundancy_aware_robot_learning.pdf::topic-00": 3,
-      "redundancy_aware_robot_learning.pdf::topic-01": 1,
-      "redundancy_aware_robot_learning.pdf::topic-03": 1,
-      "redundancy_aware_robot_learning.pdf::topic-04": 2,
-      "redundancy_aware_robot_learning.pdf::topic-02": 1
+      "carbon_footprint_ml_training.pdf::topic-06": 8,
+      "carbon_footprint_ml_training.pdf::topic-03": 4,
+      "carbon_footprint_ml_training.pdf::topic-04": 2,
+      "carbon_footprint_ml_training.pdf::topic-05": 3,
+      "carbon_footprint_ml_training.pdf::topic-07": 1,
+      "global_ai_governance_healthcare.pdf::topic-00": 4,
+      "global_ai_governance_healthcare.pdf::topic-01": 3,
+      "global_ai_governance_healthcare.pdf::topic-02": 4,
+      "global_ai_governance_healthcare.pdf::topic-03": 2,
+      "global_ai_governance_healthcare.pdf::topic-04": 4,
+      "global_ai_governance_healthcare.pdf::topic-05": 4,
+      "global_ai_governance_healthcare.pdf::topic-06": 4,
+      "global_ai_governance_healthcare.pdf::topic-07": 2,
+      "redundancy_aware_robot_learning.pdf::topic-00": 8,
+      "redundancy_aware_robot_learning.pdf::topic-01": 5,
+      "redundancy_aware_robot_learning.pdf::topic-02": 4,
+      "redundancy_aware_robot_learning.pdf::topic-03": 4,
+      "redundancy_aware_robot_learning.pdf::topic-04": 3,
+      "redundancy_aware_robot_learning.pdf::topic-05": 2,
+      "redundancy_aware_robot_learning.pdf::topic-06": 1,
+      "redundancy_aware_robot_learning.pdf::topic-07": 3,
+      "carbon_footprint_ml_training.pdf::topic-02": 2
     },
     "rejected_by_topic": {
-      "carbon_footprint_ml_training.pdf::topic-00": 7,
-      "carbon_footprint_ml_training.pdf::topic-01": 3,
-      "carbon_footprint_ml_training.pdf::topic-02": 10,
-      "carbon_footprint_ml_training.pdf::topic-03": 5,
-      "carbon_footprint_ml_training.pdf::topic-04": 9,
-      "carbon_footprint_ml_training.pdf::topic-05": 4,
-      "carbon_footprint_ml_training.pdf::topic-06": 4,
-      "carbon_footprint_ml_training.pdf::topic-07": 4,
-      "global_ai_governance_healthcare.pdf::topic-00": 4,
-      "global_ai_governance_healthcare.pdf::topic-01": 8,
-      "global_ai_governance_healthcare.pdf::topic-02": 10,
-      "global_ai_governance_healthcare.pdf::topic-03": 8,
-      "global_ai_governance_healthcare.pdf::topic-04": 9,
-      "global_ai_governance_healthcare.pdf::topic-05": 10,
-      "global_ai_governance_healthcare.pdf::topic-06": 8,
-      "global_ai_governance_healthcare.pdf::topic-07": 8,
-      "redundancy_aware_robot_learning.pdf::topic-00": 3,
-      "redundancy_aware_robot_learning.pdf::topic-01": 8,
-      "redundancy_aware_robot_learning.pdf::topic-02": 7,
-      "redundancy_aware_robot_learning.pdf::topic-03": 8,
-      "redundancy_aware_robot_learning.pdf::topic-04": 4,
-      "redundancy_aware_robot_learning.pdf::topic-05": 10,
-      "redundancy_aware_robot_learning.pdf::topic-06": 10
+      "carbon_footprint_ml_training.pdf::topic-00": 4,
+      "carbon_footprint_ml_training.pdf::topic-03": 1,
+      "carbon_footprint_ml_training.pdf::topic-05": 1,
+      "carbon_footprint_ml_training.pdf::topic-07": 3,
+      "global_ai_governance_healthcare.pdf::topic-01": 2,
+      "global_ai_governance_healthcare.pdf::topic-02": 1,
+      "global_ai_governance_healthcare.pdf::topic-03": 1,
+      "redundancy_aware_robot_learning.pdf::topic-06": 1,
+      "redundancy_aware_robot_learning.pdf::topic-03": 1
     },
     "split_by_topic": {
       "train": {
-        "carbon_footprint_ml_training.pdf::topic-01": 3,
+        "carbon_footprint_ml_training.pdf::topic-04": 2,
+        "carbon_footprint_ml_training.pdf::topic-06": 7,
+        "redundancy_aware_robot_learning.pdf::topic-00": 6,
+        "redundancy_aware_robot_learning.pdf::topic-03": 3,
+        "global_ai_governance_healthcare.pdf::topic-01": 3,
+        "global_ai_governance_healthcare.pdf::topic-05": 3,
+        "global_ai_governance_healthcare.pdf::topic-00": 4,
+        "carbon_footprint_ml_training.pdf::topic-02": 2,
+        "redundancy_aware_robot_learning.pdf::topic-06": 1,
+        "global_ai_governance_healthcare.pdf::topic-06": 3,
+        "carbon_footprint_ml_training.pdf::topic-07": 1,
+        "global_ai_governance_healthcare.pdf::topic-02": 3,
+        "carbon_footprint_ml_training.pdf::topic-03": 3,
+        "redundancy_aware_robot_learning.pdf::topic-01": 4,
+        "redundancy_aware_robot_learning.pdf::topic-07": 3,
+        "global_ai_governance_healthcare.pdf::topic-04": 2,
+        "carbon_footprint_ml_training.pdf::topic-00": 3,
+        "redundancy_aware_robot_learning.pdf::topic-02": 3,
         "redundancy_aware_robot_learning.pdf::topic-04": 2,
-        "global_ai_governance_healthcare.pdf::topic-01": 1,
-        "carbon_footprint_ml_training.pdf::topic-00": 2,
-        "global_ai_governance_healthcare.pdf::topic-07": 1,
-        "global_ai_governance_healthcare.pdf::topic-06": 1,
-        "global_ai_governance_healthcare.pdf::topic-03": 1,
-        "global_ai_governance_healthcare.pdf::topic-00": 2,
-        "redundancy_aware_robot_learning.pdf::topic-03": 1,
-        "redundancy_aware_robot_learning.pdf::topic-00": 1,
-        "redundancy_aware_robot_learning.pdf::topic-02": 1
+        "carbon_footprint_ml_training.pdf::topic-05": 3,
+        "global_ai_governance_healthcare.pdf::topic-03": 2,
+        "carbon_footprint_ml_training.pdf::topic-01": 2,
+        "redundancy_aware_robot_learning.pdf::topic-05": 1
       },
       "val": {
+        "carbon_footprint_ml_training.pdf::topic-01": 1,
+        "global_ai_governance_healthcare.pdf::topic-05": 1,
+        "global_ai_governance_healthcare.pdf::topic-07": 1,
+        "carbon_footprint_ml_training.pdf::topic-06": 1,
         "redundancy_aware_robot_learning.pdf::topic-00": 1,
-        "redundancy_aware_robot_learning.pdf::topic-01": 1
+        "redundancy_aware_robot_learning.pdf::topic-03": 1,
+        "global_ai_governance_healthcare.pdf::topic-04": 1,
+        "redundancy_aware_robot_learning.pdf::topic-02": 1
       },
       "test": {
-        "carbon_footprint_ml_training.pdf::topic-06": 1,
-        "redundancy_aware_robot_learning.pdf::topic-00": 1
+        "redundancy_aware_robot_learning.pdf::topic-04": 1,
+        "global_ai_governance_healthcare.pdf::topic-02": 1,
+        "redundancy_aware_robot_learning.pdf::topic-05": 1,
+        "global_ai_governance_healthcare.pdf::topic-06": 1,
+        "redundancy_aware_robot_learning.pdf::topic-00": 1,
+        "global_ai_governance_healthcare.pdf::topic-07": 1,
+        "carbon_footprint_ml_training.pdf::topic-03": 1,
+        "redundancy_aware_robot_learning.pdf::topic-01": 1,
+        "global_ai_governance_healthcare.pdf::topic-04": 1
       }
     },
-    "topics_without_accepted": [
-      "carbon_footprint_ml_training.pdf::topic-02",
-      "carbon_footprint_ml_training.pdf::topic-03",
-      "carbon_footprint_ml_training.pdf::topic-04",
-      "carbon_footprint_ml_training.pdf::topic-05",
+    "topics_without_accepted": [],
+    "low_accepted_topics": [
       "carbon_footprint_ml_training.pdf::topic-07",
-      "global_ai_governance_healthcare.pdf::topic-02",
-      "global_ai_governance_healthcare.pdf::topic-04",
-      "global_ai_governance_healthcare.pdf::topic-05",
-      "redundancy_aware_robot_learning.pdf::topic-05",
       "redundancy_aware_robot_learning.pdf::topic-06"
     ],
-    "low_accepted_topics": [
-      "carbon_footprint_ml_training.pdf::topic-06",
-      "global_ai_governance_healthcare.pdf::topic-01",
-      "global_ai_governance_healthcare.pdf::topic-03",
-      "global_ai_governance_healthcare.pdf::topic-06",
-      "global_ai_governance_healthcare.pdf::topic-07",
-      "redundancy_aware_robot_learning.pdf::topic-01",
-      "redundancy_aware_robot_learning.pdf::topic-02",
-      "redundancy_aware_robot_learning.pdf::topic-03"
-    ],
+    "coverage_ratio": 1.0,
+    "multi_doc_in_splits": {
+      "train": true,
+      "val": true,
+      "test": true
+    },
+    "pipeline_success": true,
     "warnings": [
-      "topics_without_accepted: carbon_footprint_ml_training.pdf::topic-02, carbon_footprint_ml_training.pdf::topic-03, carbon_footprint_ml_training.pdf::topic-04, carbon_footprint_ml_training.pdf::topic-05, carbon_footprint_ml_training.pdf::topic-07, global_ai_governance_healthcare.pdf::topic-02, global_ai_governance_healthcare.pdf::topic-04, global_ai_governance_healthcare.pdf::topic-05, redundancy_aware_robot_learning.pdf::topic-05, redundancy_aware_robot_learning.pdf::topic-06",
-      "topics_below_2_items: carbon_footprint_ml_training.pdf::topic-06, global_ai_governance_healthcare.pdf::topic-01, global_ai_governance_healthcare.pdf::topic-03, global_ai_governance_healthcare.pdf::topic-06, global_ai_governance_healthcare.pdf::topic-07, redundancy_aware_robot_learning.pdf::topic-01, redundancy_aware_robot_learning.pdf::topic-02, redundancy_aware_robot_learning.pdf::topic-03"
+      "topics_below_2_items: carbon_footprint_ml_training.pdf::topic-07, redundancy_aware_robot_learning.pdf::topic-06"
     ]
   },
   "resumed_documents": 0,
   "split": {
-    "train": 16,
-    "val": 2,
-    "test": 2
+    "train": 66,
+    "val": 8,
+    "test": 9
   },
   "params": {
     "chunk_size": 3500,
@@ -178,6 +483,6 @@
       "pypdf": "6.10.2",
       "pymupdf4llm": "1.27.2.2"
     },
-    "git_commit": "bda9902"
+    "git_commit": "f032d62"
   }
 }
