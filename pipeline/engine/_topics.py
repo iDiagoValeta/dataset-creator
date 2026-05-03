@@ -366,8 +366,8 @@ def build_fallback_topics_from_chunks(chunks: Sequence[Chunk], num_topics: int) 
     return topics
 
 
-def score_chunk_for_topic(chunk: Chunk, topic: Topic) -> int:
-    """Simple lexical scoring for chunk-topic alignment."""
+def _raw_lexical_score(chunk: Chunk, topic: Topic) -> int:
+    """Sum-only lexical score of a chunk against a single topic."""
     haystack = f"{chunk.text.lower()} {chunk.document.lower()}"
     score = 0
     for token in [topic.name, topic.summary, *topic.keywords]:
@@ -382,6 +382,33 @@ def score_chunk_for_topic(chunk: Chunk, topic: Topic) -> int:
     return score
 
 
+def score_chunk_for_topic(
+    chunk: Chunk,
+    topic: Topic,
+    all_topics: Sequence[Topic] | None = None,
+    cross_penalty: float = 0.35,
+) -> int:
+    """Lexical scoring with optional penalty for overlap with sibling topics.
+
+    When ``all_topics`` includes additional sibling topics from the same document,
+    the strongest sibling score is subtracted (scaled by ``cross_penalty``) to
+    discourage chunks that match multiple topics. The result is clamped at 0.
+    """
+    raw = _raw_lexical_score(chunk, topic)
+    if not all_topics:
+        return raw
+    sibling_scores = [
+        _raw_lexical_score(chunk, sibling)
+        for sibling in all_topics
+        if sibling.topic_id != topic.topic_id
+    ]
+    if not sibling_scores:
+        return raw
+    strongest_sibling = max(sibling_scores)
+    penalized = raw - cross_penalty * strongest_sibling
+    return max(0, int(round(penalized)))
+
+
 def _chunk_is_too_noisy_for_topic_context(chunk: Chunk) -> bool:
     """Return True for chunks dominated by table/extraction noise."""
     text = chunk.text.strip()
@@ -389,6 +416,19 @@ def _chunk_is_too_noisy_for_topic_context(chunk: Chunk) -> bool:
     if re.search(r"(?:^|\s)(?:---\s*){2,}", text):
         return True
     if lowered.startswith(("uld ", "lic ", "sary ", "tions ", "tive ")):
+        return True
+    # Chunks that begin inside a cut word ("vailability", "ceptance"...) inject
+    # extraction artifacts into the topic_context and contaminate generation.
+    # Trigger only on the strong signal "lowercase fragment + capitalized next
+    # word": that pattern is unusual outside of truncated extractions and
+    # avoids the false positives a bare ^[a-z]{3,}\b regex produces.
+    first_words = text.split()[:2]
+    if (
+        len(first_words) >= 2
+        and first_words[0].islower()
+        and len(first_words[0]) >= 4
+        and first_words[1][:1].isupper()
+    ):
         return True
     if len(re.findall(r"\b\w+-\s+\w+", text)) >= 4:
         return True
@@ -408,13 +448,14 @@ def _score_chunks_semantic(
     topic: Topic,
     embedding_model: str,
     embedding_cache: dict[str, list[float]] | None,
+    all_topics: Sequence[Topic] | None = None,
 ) -> list[tuple[float, Chunk]]:
     """Score chunks by cosine similarity to the topic embedding."""
     cache: dict[str, list[float]] = embedding_cache if embedding_cache is not None else {}
     topic_emb = get_topic_embedding(topic, embedding_model)
     if not topic_emb:
         logger.warning("Embedding vacío para topic '%s'; usando scoring léxico.", topic.name)
-        return [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
+        return [(float(score_chunk_for_topic(chunk, topic, all_topics=all_topics)), chunk) for chunk in chunks]
     return [
         (max(0.0, score_chunk_for_topic_semantic(chunk, topic, topic_emb, embedding_model, cache)), chunk)
         for chunk in chunks
@@ -426,9 +467,13 @@ def _score_chunks_hybrid(
     topic: Topic,
     embedding_model: str,
     embedding_cache: dict[str, list[float]] | None,
+    all_topics: Sequence[Topic] | None = None,
 ) -> list[tuple[float, Chunk]]:
     """Combine normalized lexical score and semantic similarity."""
-    lexical_scores = [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
+    lexical_scores = [
+        (float(score_chunk_for_topic(chunk, topic, all_topics=all_topics)), chunk)
+        for chunk in chunks
+    ]
     max_lexical = max((score for score, _ in lexical_scores), default=0.0)
 
     cache: dict[str, list[float]] = embedding_cache if embedding_cache is not None else {}
@@ -452,33 +497,62 @@ def build_topic_context(
     retrieval_mode: str = "lexical",
     embedding_model: str = "",
     embedding_cache: dict[str, list[float]] | None = None,
+    all_topics: Sequence[Topic] | None = None,
+    excluded_chunk_ids: set[str] | None = None,
 ) -> str:
-    """Select and concatenate best chunks for a given topic."""
+    """Select and concatenate best chunks for a given topic.
+
+    When ``all_topics`` is provided, lexical scoring is multi-topic-aware and
+    chunks that match sibling topics are penalized. ``excluded_chunk_ids``
+    drops specific chunks from the candidate pool — useful for backfill
+    re-tries that need a different evidence set than the first attempt.
+    """
     chunks = _usable_chunks_for_topic_context(chunks)
+    if excluded_chunk_ids:
+        chunks = [chunk for chunk in chunks if chunk.chunk_id not in excluded_chunk_ids] or chunks
     topic_name = topic.name.strip().lower()
     if topic_name:
-        for index, chunk in enumerate(chunks):
-            if topic_name in chunk.text.lower():
-                selected_blocks: list[str] = []
-                total = 0
-                for section_chunk in chunks[index : min(len(chunks), index + 2)]:
-                    block = f"[{section_chunk.chunk_id}] {section_chunk.text}"
-                    if total + len(block) > max_topic_context_chars:
-                        remaining = max_topic_context_chars - total
-                        if remaining >= 500:
-                            selected_blocks.append(truncate_text(block, remaining))
-                        break
-                    selected_blocks.append(block)
-                    total += len(block)
-                if selected_blocks:
-                    return "\n\n".join(selected_blocks)
+        # Only honor the literal match when it is unambiguous (the topic name
+        # appears in 1-2 chunks). Otherwise the heuristic drags neighboring
+        # chunks that belong to other topics into the context.
+        match_indices = [
+            idx for idx, chunk in enumerate(chunks) if topic_name in chunk.text.lower()
+        ]
+        contiguous = bool(match_indices) and (
+            len(match_indices) <= 2 and (
+                len(match_indices) == 1
+                or match_indices[1] - match_indices[0] == 1
+            )
+        )
+        if contiguous:
+            index = match_indices[0]
+            selected_blocks: list[str] = []
+            total = 0
+            for section_chunk in chunks[index : min(len(chunks), index + 2)]:
+                block = f"[{section_chunk.chunk_id}] {section_chunk.text}"
+                if total + len(block) > max_topic_context_chars:
+                    remaining = max_topic_context_chars - total
+                    if remaining >= 500:
+                        selected_blocks.append(truncate_text(block, remaining))
+                    break
+                selected_blocks.append(block)
+                total += len(block)
+            if selected_blocks:
+                return "\n\n".join(selected_blocks)
 
     if retrieval_mode == "semantic":
-        scored = _score_chunks_semantic(chunks, topic, embedding_model, embedding_cache)
+        scored = _score_chunks_semantic(
+            chunks, topic, embedding_model, embedding_cache, all_topics=all_topics
+        )
     elif retrieval_mode == "hybrid":
-        scored = _score_chunks_hybrid(chunks, topic, embedding_model, embedding_cache)
+        scored = _score_chunks_hybrid(
+            chunks, topic, embedding_model, embedding_cache, all_topics=all_topics
+        )
     else:
-        scored = [(float(score_chunk_for_topic(chunk, topic)), chunk) for chunk in chunks]
+        scored = [
+            (float(score_chunk_for_topic(chunk, topic, all_topics=all_topics)), chunk)
+            for chunk in chunks
+        ]
 
     scored.sort(key=lambda item: item[0], reverse=True)
 
