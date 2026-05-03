@@ -8,7 +8,7 @@ I needed high-quality QA datasets for my own projects, especially in **Spanish (
 
 This repository automates that workflow end-to-end: extract text from PDFs, detect the document language, map topics, generate grounded QA pairs with a local Ollama model, deduplicate, and export ready-to-train JSONL splits, all while keeping traceability back to the source context.
 
-The pipeline extracts text, detects the document language, maps topics, generates grounded Q/A pairs, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset.
+The pipeline extracts text, detects the document language, maps topics, generates grounded Q/A pairs, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset, while `--judge filter` removes judge failures from the final JSONL.
 
 ## Quick Start
 
@@ -16,19 +16,30 @@ Requirements:
 
 - Python 3.10+
 - Ollama running locally
+- Ollama server context set to `OLLAMA_CONTEXT_LENGTH=32768`
 - Generator model: `gemma4:e4b`
 - Embedding model for default hybrid retrieval: `embeddinggemma:latest`
-- Optional judge model for `--judge audit`: `gemma4:e4b`
+- Optional judge model for `--judge audit` / `--judge filter`: `gemma4:e4b`
 
-```bash
+```powershell
 pip install -r pipeline/requirements.txt
 pip install -r pipeline/requirements-dev.txt
 
 ollama pull gemma4:e4b
 ollama pull embeddinggemma:latest
 
+[Environment]::SetEnvironmentVariable("OLLAMA_CONTEXT_LENGTH", "32768", "User")
+# Close Ollama completely, open a new terminal, then start it again.
+ollama serve
+```
+
+In another terminal:
+
+```powershell
 python pipeline/generate_dataset.py
 ```
+
+For a one-terminal run instead of a persistent Windows setting, start Ollama from the same PowerShell session with `$env:OLLAMA_CONTEXT_LENGTH="32768"` before `ollama serve`. Ollama's VRAM-based default can be 4096 tokens, which truncates long document context and can produce smaller, poorer topic maps.
 
 Put source PDFs in `pipeline/input/`. Generated files are written to `pipeline/output/`.
 
@@ -47,16 +58,16 @@ examples/
   carbon_footprint_ml_training.pdf      source PDF 1
   global_ai_governance_healthcare.pdf   source PDF 2
   redundancy_aware_robot_learning.pdf   source PDF 3
-  dataset.jsonl          24 accepted QA items
-  dataset_train.jsonl    19 train items
+  dataset.jsonl          20 accepted QA items
+  dataset_train.jsonl    16 train items
   dataset_val.jsonl       2 validation items
-  dataset_test.jsonl      3 test items
+  dataset_test.jsonl      2 test items
   dataset.meta.json      run metadata, quality stats, audit stats
-  dataset.rejected.jsonl 48 rejected items
+  dataset.rejected.jsonl 161 rejected items
   dataset.judged.jsonl   24 items with judge scores
 ```
 
-Generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, `--judge audit`, and English auto-detection. All 24 accepted items have verified literal context (`context_source_verified=true`), zero mojibake, zero cross-chunk contexts, and zero verbatim answers. The judge found 19 pass and 5 fail among the accepted rows, with zero `judge_error` rows.
+Generated with `gemma4:e4b`, `quality_gate=strict`, `retrieval=hybrid`, `embedding_model=embeddinggemma:latest`, `--judge filter`, `OLLAMA_CONTEXT_LENGTH=32768`, and English auto-detection. All 20 final accepted items have verified literal context (`context_source_verified=true`), zero mojibake, zero cross-chunk contexts, and zero verbatim answers. The judge audited 24 candidate rows, found 20 pass and 4 fail, and filtered the 4 failed rows from the final dataset.
 
 ## Common Commands
 
@@ -85,6 +96,9 @@ python pipeline/generate_dataset.py --judge audit
 python pipeline/generate_dataset.py --quality-gate strict --judge audit
 python pipeline/generate_dataset.py --judge audit --judge-model llama3.1:8b
 
+# Strict final dataset: judge failures move to dataset.rejected.jsonl
+python pipeline/generate_dataset.py --quality-gate strict --judge filter
+
 # Resume or estimate
 python pipeline/generate_dataset.py --resume
 python pipeline/generate_dataset.py --dry-run
@@ -107,7 +121,7 @@ python pipeline/generate_dataset.py --clean
 | `--retrieval` | `hybrid` | `lexical`, `semantic`, or `hybrid` chunk selection |
 | `--embedding-model` | `embeddinggemma:latest` | Ollama model for semantic/hybrid retrieval |
 | `--quality-gate` | `strict` | `strict`, `balanced`, or `off` |
-| `--judge` | `off` | `off` or `audit`; audits final accepted rows without filtering |
+| `--judge` | `off` | `off`, `audit`, or `filter`; `filter` removes judge failures from the final dataset |
 | `--judge-model` | `gemma4:e4b` | Ollama judge model; override with `OLLAMA_JUDGE_MODEL` or the CLI flag |
 | `--split` | `0.8,0.1,0.1` | Train/val/test ratios |
 | `--resume` | off | Reuse per-document checkpoints |
@@ -121,17 +135,19 @@ The deterministic quality gate also rejects:
 
 - **Mojibake** — double-encoded UTF-8 sequences (e.g. `â€™`, `Î¸`) in any Q/A field. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback.
 - **Cross-chunk context** (`cross_chunk_context`) — `context_source` that contains an internal chunk marker, meaning the LLM copied text spanning two source chunks. Markers are also stripped from generated text before quality checks.
-- **Verbatim answers** (`verbatim_answer`) — answers with ≥ 75 % bigram overlap with `context_source` and length comparable to the context (a proxy for copy-paste without reformulation).
+- **Verbatim answers** (`verbatim_answer`) — answers with >= 70 % answer-bigram overlap with `context_source`, including short copied evidence phrases.
 - Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, and answers that add too many unsupported content terms for RAG-style factual rows.
 
-`--judge audit` runs an Ollama judge after quality filtering and deduplication. It audits accepted rows one document at a time for clearer progress and smaller judge batches, then writes one combined `dataset.judged.jsonl`. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force a `fail` decision regardless of the LLM score. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`. It does not modify `dataset.jsonl`.
+`--judge audit` runs an Ollama judge after quality filtering and deduplication. It audits accepted rows one document at a time for clearer progress and smaller judge batches, then writes one combined `dataset.judged.jsonl`. It treats `context_source` as the only allowed evidence and checks whether the answer is factually deducible from that literal context. The judge applies deterministic pre-checks (mojibake, internal chunk markers, verbatim answers) before calling the LLM, and blocking reasons (`cross_chunk_context`, `extraction_artifact`, `overly_extractive`, `truncated_context`, `unsupported_detail`) force a `fail` decision regardless of the LLM score. A noisy `weak_context` or `judge_error` reason is reconciled to `factual` only when the LLM also returns `decision=pass` and all component scores are at least 0.8. The minimum passing score across all three components (context quality, answer support, question quality) is 0.6. The judge writes `dataset.judged.jsonl` with the original accepted rows plus `judge_score`, `judge_context_quality`, `judge_answer_support`, `judge_question_quality`, `judge_decision`, `judge_reasons`, `judge_explanation`, and `judge_model`.
+
+`--judge filter` runs the same audit but only writes `judge_decision=pass` rows to `dataset.jsonl` and the split files. Rows with `review` or `fail` are appended to `dataset.rejected.jsonl` with `rejection_reason="judge_fail:<reason>"`. Metadata records `quality.judge_filtered_items` and `quality.final_items_after_judge`.
 
 The metadata file records:
 
 - generation counts and split sizes
 - detected document languages
 - quality gate stats and rejection reasons
-- judge audit stats when enabled, including overall and component score averages
+- judge stats when enabled, including overall and component score averages
 - deduplication counts
 - topic coverage audit and warnings
 - runtime/package/git reproducibility info
@@ -168,7 +184,7 @@ document, document_language, source_chunk_ids, created_at
 
 For RAG-oriented use, the core supervised triple is `question`, literal `context_source`, and `answer`; the other fields are traceability and audit metadata.
 
-When `--judge audit` is enabled, `dataset.judged.jsonl` adds:
+When `--judge audit` or `--judge filter` is enabled, `dataset.judged.jsonl` adds:
 
 ```text
 judge_score, judge_context_quality, judge_answer_support,
