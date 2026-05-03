@@ -382,6 +382,27 @@ def score_chunk_for_topic(chunk: Chunk, topic: Topic) -> int:
     return score
 
 
+def _chunk_is_too_noisy_for_topic_context(chunk: Chunk) -> bool:
+    """Return True for chunks dominated by table/extraction noise."""
+    text = chunk.text.strip()
+    lowered = text.lower()
+    if re.search(r"(?:^|\s)(?:---\s*){2,}", text):
+        return True
+    if lowered.startswith(("uld ", "lic ", "sary ", "tions ", "tive ")):
+        return True
+    if len(re.findall(r"\b\w+-\s+\w+", text)) >= 4:
+        return True
+    alpha_chars = sum(ch.isalpha() for ch in text)
+    if len(text) >= 500 and alpha_chars / max(1, len(text)) < 0.45:
+        return True
+    return False
+
+
+def _usable_chunks_for_topic_context(chunks: Sequence[Chunk]) -> Sequence[Chunk]:
+    usable = [chunk for chunk in chunks if not _chunk_is_too_noisy_for_topic_context(chunk)]
+    return usable if usable else chunks
+
+
 def _score_chunks_semantic(
     chunks: Sequence[Chunk],
     topic: Topic,
@@ -433,6 +454,7 @@ def build_topic_context(
     embedding_cache: dict[str, list[float]] | None = None,
 ) -> str:
     """Select and concatenate best chunks for a given topic."""
+    chunks = _usable_chunks_for_topic_context(chunks)
     topic_name = topic.name.strip().lower()
     if topic_name:
         for index, chunk in enumerate(chunks):
