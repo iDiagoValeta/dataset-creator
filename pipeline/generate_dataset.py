@@ -181,6 +181,7 @@ def audit_items_with_judge_by_document(
     model: str,
     temperature: float,
     seed: int | None = None,
+    mode: str = "audit",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Audit accepted rows one document at a time and aggregate judge stats."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -198,7 +199,33 @@ def audit_items_with_judge_by_document(
         )
         judged_rows.extend(document_judged)
 
-    return judged_rows, build_judge_stats("audit", model, judged_rows)
+    return judged_rows, build_judge_stats(mode, model, judged_rows)
+
+
+def filter_rows_by_judge(
+    rows: list[dict[str, Any]],
+    judged_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep only rows that passed the judge and return rejected judge rows."""
+    judged_by_id = {str(row.get("id", "")): row for row in judged_rows}
+    passed: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in rows:
+        row_id = str(row.get("id", ""))
+        judged = judged_by_id.get(row_id)
+        if judged and judged.get("judge_decision") == "pass":
+            passed.append(row)
+            continue
+        reject_row = dict(judged or row)
+        reasons = [
+            str(reason)
+            for reason in reject_row.get("judge_reasons", [])
+            if str(reason) and str(reason) != "factual"
+        ]
+        reason = reasons[0] if reasons else str(reject_row.get("judge_decision", "unknown"))
+        reject_row["rejection_reason"] = f"judge_fail:{reason}"
+        rejected.append(reject_row)
+    return passed, rejected
 
 
 def infer_resume_counts(
@@ -298,7 +325,7 @@ def main() -> None:
         verify_ollama_model(args.model)
         if getattr(args, "retrieval", "lexical") in {"semantic", "hybrid"}:
             verify_ollama_model(args.embedding_model)
-        if getattr(args, "judge", "off") == "audit":
+        if getattr(args, "judge", "off") in {"audit", "filter"}:
             verify_ollama_model(args.judge_model)
 
     args.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -570,13 +597,14 @@ def main() -> None:
         min_items_per_topic = 2
         accepted_by_topic: dict[str, int] = {}
         for item in quality_candidates:
-            topic_id = str(item.get("topic_id", ""))
-            accepted_by_topic[topic_id] = accepted_by_topic.get(topic_id, 0) + 1
+            topic_key = f"{item.get('document', '__missing__')}::{item.get('topic_id', '__missing__')}"
+            accepted_by_topic[topic_key] = accepted_by_topic.get(topic_key, 0) + 1
 
         backfill_items: list[dict[str, Any]] = []
         for record_idx, record in enumerate(topic_generation_records):
             topic = record["topic"]
-            accepted_count = accepted_by_topic.get(topic.topic_id, 0)
+            topic_key = f"{record['document']}::{topic.topic_id}"
+            accepted_count = accepted_by_topic.get(topic_key, 0)
             if accepted_count >= min_items_per_topic:
                 continue
             needed = min(args.questions_per_topic, min_items_per_topic - accepted_count + 2)
@@ -627,10 +655,35 @@ def main() -> None:
     quality_stats["duplicate_items_removed_after_quality"] = len(quality_candidates) - len(deduped)
     quality_stats["accepted_items"] = len(deduped)
     quality_stats["verified_items"] = sum(1 for item in deduped if item.get("context_source_verified"))
-    train_rows, val_rows, test_rows = split_rows(deduped, split=split, seed=args.seed)
-    expected_topic_ids = [str(record["topic"].topic_id) for record in topic_generation_records]
+
+    output_base = args.output.with_suffix("")
+    final_rows = deduped
+    judge_stats = build_judge_stats(getattr(args, "judge", "off"), args.judge_model, [])
+    if getattr(args, "judge", "off") in {"audit", "filter"}:
+        judged_rows, judge_stats = audit_items_with_judge_by_document(
+            deduped,
+            model=args.judge_model,
+            temperature=0.0,
+            seed=args.seed,
+            mode=args.judge,
+        )
+        write_jsonl(Path(f"{output_base}.judged.jsonl"), judged_rows)
+        if args.judge == "filter":
+            final_rows, judge_rejected_rows = filter_rows_by_judge(deduped, judged_rows)
+            rejected_rows.extend(judge_rejected_rows)
+            quality_stats["judge_filtered_items"] = len(judge_rejected_rows)
+            quality_stats["final_items_after_judge"] = len(final_rows)
+            quality_stats["accepted_items"] = len(final_rows)
+            quality_stats["verified_items"] = sum(
+                1 for item in final_rows if item.get("context_source_verified")
+            )
+
+    train_rows, val_rows, test_rows = split_rows(final_rows, split=split, seed=args.seed)
+    expected_topic_ids = [
+        f"{record['document']}::{record['topic'].topic_id}" for record in topic_generation_records
+    ]
     dataset_audit = build_dataset_audit(
-        deduped,
+        final_rows,
         rejected_rows,
         train_rows,
         val_rows,
@@ -638,24 +691,13 @@ def main() -> None:
         expected_topic_ids=expected_topic_ids,
     )
 
-    write_jsonl(args.output, deduped)
-    output_base = args.output.with_suffix("")
+    write_jsonl(args.output, final_rows)
     write_jsonl(Path(f"{output_base}_train.jsonl"), train_rows)
     write_jsonl(Path(f"{output_base}_val.jsonl"), val_rows)
     write_jsonl(Path(f"{output_base}_test.jsonl"), test_rows)
     write_jsonl(Path(f"{output_base}.rejected.jsonl"), rejected_rows)
 
-    judge_stats = build_judge_stats(getattr(args, "judge", "off"), args.judge_model, [])
-    if getattr(args, "judge", "off") == "audit":
-        judged_rows, judge_stats = audit_items_with_judge_by_document(
-            deduped,
-            model=args.judge_model,
-            temperature=0.0,
-            seed=args.seed,
-        )
-        write_jsonl(Path(f"{output_base}.judged.jsonl"), judged_rows)
-
-    verified_count = sum(1 for item in deduped if item.get("context_source_verified"))
+    verified_count = sum(1 for item in final_rows if item.get("context_source_verified"))
     metadata = {
         "created_at": now_iso(),
         "model": args.model,
@@ -667,8 +709,8 @@ def main() -> None:
         "chunk_count": total_chunks,
         "topic_count": total_topics,
         "generated_items": len(generated),
-        "deduplicated_items": len(deduped),
-        "accepted_items": len(deduped),
+        "deduplicated_items": len(final_rows),
+        "accepted_items": len(final_rows),
         "rejected_items": len(rejected_rows),
         "context_source_verified_items": verified_count,
         "quality": quality_stats,
@@ -698,7 +740,7 @@ def main() -> None:
     write_metadata(args.output.with_suffix(".meta.json"), metadata)
 
     print("")
-    if not deduped:
+    if not final_rows:
         print("[AVISO] El dataset final quedo vacio. Revisar:")
         print("  - Logs en run_logs/ por cada PDF (topic_map_strategy, attempts).")
         print("  - Que el modelo Ollama devuelve JSON valido para este idioma.")
@@ -706,14 +748,16 @@ def main() -> None:
         print(f"  - Items generados: {len(generated)} | aceptados pre-dedup: {len(quality_candidates)}")
     else:
         print("Dataset generado correctamente.")
-    print(f"- Total items: {len(deduped)}")
+    print(f"- Total items: {len(final_rows)}")
     print(f"- Items rechazados por quality gate: {len(rejected_rows)}")
     print(f"- Archivo principal: {args.output}")
     print(f"- Rechazados: {Path(f'{output_base}.rejected.jsonl')}")
-    if getattr(args, "judge", "off") == "audit":
+    if getattr(args, "judge", "off") in {"audit", "filter"}:
         print(f"- Auditados por juez: {Path(f'{output_base}.judged.jsonl')}")
+    if getattr(args, "judge", "off") == "filter":
+        print(f"- Items filtrados por juez: {quality_stats.get('judge_filtered_items', 0)}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
-    print(f"- context_source verificado (substring literal): {verified_count}/{len(deduped)}")
+    print(f"- context_source verificado (substring literal): {verified_count}/{len(final_rows)}")
     if dataset_audit["warnings"]:
         print(f"- Avisos de auditoria: {len(dataset_audit['warnings'])}")
     if args.resume:
