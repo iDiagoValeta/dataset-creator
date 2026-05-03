@@ -41,7 +41,9 @@ pipeline/
     _prompts.py          ← LLM prompt builders and JSON parser
     _ollama.py           ← Ollama client wrapper
     _topics.py           ← topic parsing, validation, retrieval
+    _evidence.py         ← literal evidence-window extraction/ranking
     _quality.py          ← quality gate and deduplication
+    _judge.py            ← optional factuality judge audit/filter
     _generation.py       ← QA generation per topic
     _export.py           ← JSONL I/O, splits, metadata
     _cli.py              ← argparse, validation, dry-run
@@ -73,23 +75,27 @@ pyproject.toml
 3. Split text into overlapping chunks.
 4. Detect the document language unless `--language` forces a specific output language.
 5. Generate a topic map per document using wide context, with compact retry, section-heading refinement for overly generic maps, and chunk fallback.
-6. Generate questions per topic without semantic repetition in the document language.
-7. Apply the quality gate before deduplication. In `strict` mode, keep only clean items with verified source context, topic alignment, and enough source support; write rejected rows to `dataset.rejected.jsonl`.
-8. Backfill topics with fewer than 2 accepted rows, then rerun quality filtering.
-9. Deduplicate accepted items (exact + semantic via bigrams, including duplicate answers).
-10. Export the main JSONL and topic-aware train/val/test splits.
-11. Persist metadata, audit stats, per-document/topic run logs, plus per-document checkpoints for `--resume`.
+6. Select ranked literal evidence windows per topic (1-3 complete sentences, one source chunk), then ask Ollama to generate only question/answer/type/difficulty from each fixed evidence window.
+7. Reassign each generated item to the best-fitting topic of its document, or reject with `topic_mismatch_reassign` when no topic matches.
+8. Apply evidence-level repair when generated answers are copied too closely, circular, or insufficiently supported, then apply the quality gate before deduplication. In `strict` mode, keep only clean items with verified source context, topic alignment, and enough source support; write rejected rows to `dataset.rejected.jsonl`.
+9. Backfill topics below the requested item count by trying unused evidence windows first, then an alternate retrieval context; topics with fewer than 2 final rows are recorded in `quality.unfillable_topics`.
+10. Deduplicate accepted items (exact + semantic via bigrams, plus question-, QA-, and answer-term overlap), reporting separated counts in `quality.dedup_breakdown`.
+11. Export the main JSONL and topic-aware train/val/test splits.
+12. Persist metadata, audit stats, per-document/topic run logs, plus per-document checkpoints for `--resume`.
 
 ## 6. Critical variables
 
 | Variable | Default | Usage |
 |---|---|---|
+| `OLLAMA_CONTEXT_LENGTH` | `32768` | Recommended Ollama server context window for long-document topic mapping; restart Ollama after changing it |
 | `OLLAMA_DATASET_MODEL` | `gemma4:e4b` | Primary generator model |
 | `OLLAMA_TIMEOUT_SECS` | `300` | Ollama call timeout |
 | `OLLAMA_MAX_RETRIES` | `3` | Retries on transient Ollama errors |
 | `OLLAMA_RETRY_BACKOFF_SECS` | `2.0` | Linear backoff between retries |
 | `OLLAMA_EMBEDDING_MODEL` | `embeddinggemma:latest` | Ollama model for semantic/hybrid embeddings |
+| `OLLAMA_JUDGE_MODEL` | `gemma4:e4b` | Ollama model for `--judge audit` / `--judge filter` |
 | `DATASET_RETRIEVAL` | `hybrid` | Chunk retrieval mode (`lexical`, `semantic`, or `hybrid`) |
+| `DATASET_JUDGE` | `off` | Judge mode (`off`, `audit`, or `filter`) |
 | `DATASET_LOG_LEVEL` | `INFO` | Logging level (`DEBUG/INFO/WARNING/ERROR`) |
 | `DATASET_LANGUAGE` | `auto` | Detect language per PDF; use `es`, `en`, `ca`, etc. to force output |
 | `DATASET_CHUNK_SIZE` | `3500` | Chunk size |
@@ -107,9 +113,12 @@ pyproject.toml
 
 - `--language auto` is the default and should generate topics, questions, and answers in the detected source-document language.
 - `--language <code>` forces one language for all PDFs.
+- Generation is evidence-first by default: code selects literal `context_source` windows from the extracted topic context and Ollama generates only `question`, `answer`, `type`, and `difficulty` from that fixed evidence. `context_source_verified=true` means `context_source` is a literal substring of the extracted document context after whitespace normalization.
 - `--quality-gate strict|balanced|off` controls final dataset filtering. Default `strict` rejects unverified items, circular answers, common extraction artifacts, truncated context sources, first-person paper voice, clear topic mismatches, and insufficiently supported compare/inference answers; rejected rows are written to `dataset.rejected.jsonl`.
 - `balanced` keeps unverified context sources but still applies deterministic quality checks and circular-answer filtering.
-- `--retrieval lexical|semantic|hybrid` selects the chunk retrieval strategy for topic context building. Default `hybrid` combines lexical scoring and Ollama embeddings; embeddings are cached per chunk within a document. Requires the embedding model to be available in Ollama.
+- `--judge off|audit|filter` controls optional LLM factuality auditing after quality filtering and deduplication. Default `off` keeps current cost and output behavior. `audit` writes judge scores without changing `dataset.jsonl`; `filter` keeps only `judge_decision=pass` rows in `dataset.jsonl` and moves `review`/`fail` rows to `dataset.rejected.jsonl`.
+- `--judge-model MODEL` sets the Ollama model used by `--judge audit` or `--judge filter`. Defaults to `OLLAMA_JUDGE_MODEL`, whose default is `gemma4:e4b`.
+- `--retrieval lexical|semantic|hybrid` selects the chunk retrieval strategy for topic context building. Default `hybrid` combines lexical scoring and Ollama embeddings; embeddings are cached per chunk within a document. Requires the embedding model to be available in Ollama. Evidence windows are then extracted and ranked from the retrieved context before Q/A generation.
 - `--embedding-model MODEL` sets the Ollama model used for embeddings when `--retrieval semantic` or `--retrieval hybrid`. Defaults to `embeddinggemma:latest`.
 - `--topics-file PATH` loads a YAML (requires `pyyaml`) or plain-text file with user-defined topics. Skips the LLM topic mapping step entirely. Topics get `topic_id` with prefix `user-`.
 - `--questions-file PATH` loads a plain-text file with one seed question per line. Skips topic mapping; generates one answer per question. Items get `topic_id` with prefix `seed-`. Mutually exclusive with `--topics-file`. Both flags are compatible with `--only-doc`, `--resume`, and `--quality-gate`.
@@ -119,11 +128,25 @@ pyproject.toml
 
 ## 8. Output schema and metadata notes
 
-Each item includes `document_language` and `source_chunk_ids` in addition to the QA fields, topic fields, source document, timestamps, and context traceability.
+Each item includes `document_language` and `source_chunk_ids` in addition to the QA fields, topic fields, source document, timestamps, and context traceability. Items moved to a different topic by post-generation reassignment also include `reassigned_from = {topic_id, topic}` recording the original assignment.
 
 `dataset.meta.json` includes `document_languages`, a mapping from PDF filename to the detected or forced language, plus counts, params, split sizes, runtime info, audit stats, and reproducibility metadata.
 
-Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons, backfill count, accepted items before dedupe, verified items before dedupe, and duplicates removed after quality filtering. The `audit` block records accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, low-coverage topics, and audit warnings.
+Important metadata counts distinguish generation stages: `generated_items`, `deduplicated_items`, `accepted_items`, `rejected_items`, and `context_source_verified_items`. The `quality` block records the active gate, accepted/rejected counts, verified ratio, rejection reasons (including `topic_mismatch_reassign`), backfill count, accepted items before dedupe, verified items before dedupe, duplicates removed after quality filtering, plus:
+
+- `quality.dedup_breakdown` — separated counts for `duplicate_exact`, `duplicate_semantic_question`, `duplicate_semantic_qa`, and `duplicate_semantic_answer`.
+- `quality.evidence_first` — counters for `candidate_windows`, `attempted_windows`, `accepted_from_evidence`, `repair_attempts`, `discarded_windows`, and `evidence_exhausted_topics`.
+- `quality.topic_reassignments` — `{reassigned, rejected_no_match, kept_as_is}` counts produced by the reassignment pass.
+- `quality.backfill_attempts` — list of attempts (`primary` or `alt:<retrieval>`) per topic key.
+- `quality.unfillable_topics` — list of `{document, topic_id, topic_name, attempts, accepted}` for topics that did not reach the minimum after backfill.
+
+The `audit` block records accepted/rejected counts by topic, split coverage by topic, topics with no accepted rows, low-coverage topics, audit warnings, and additionally:
+
+- `audit.coverage_ratio` — fraction of expected topics with at least one accepted item.
+- `audit.multi_doc_in_splits` — `{train, val, test}` booleans indicating whether each split contains rows from more than one document.
+- `audit.pipeline_success` — `True` when topic coverage clears the soft threshold (≤ 20 % of topics missing accepted items, with a minimum tolerance of one topic for small documents).
+
+Per-document debug JSON files in `pipeline/run_logs` include selected evidence windows, evidence-first generation attempts, and parsed payloads.
 
 The standard output set includes:
 
