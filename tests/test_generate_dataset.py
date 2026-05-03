@@ -41,6 +41,12 @@ def test_cli_defaults_use_hybrid_embeddinggemma_and_gemma4_e4b():
     assert args.judge_model == "gemma4:e4b"
 
 
+def test_cli_accepts_judge_filter_mode():
+    args = gd.build_arg_parser().parse_args(["--judge", "filter"])
+    gd.validate_args(args)
+    assert args.judge == "filter"
+
+
 # --- chunk_text -------------------------------------------------------
 
 def test_chunk_text_produces_overlapping_chunks():
@@ -718,6 +724,23 @@ def test_apply_quality_gate_rejects_topic_mismatch():
     assert stats["rejection_reasons"] == {"topic_mismatch": 1}
 
 
+def test_apply_quality_gate_rejects_local_topic_mismatch_without_domain_terms():
+    item = {
+        "id": "wrong-local-topic",
+        "question": "What should organizations do regarding their energy consumption and carbon footprint?",
+        "answer": "They should publish their energy consumption and carbon footprint.",
+        "context_source": "They should also publish their energy consumption and carbon footprint.",
+        "context_source_verified": True,
+        "type": "factual",
+        "topic": "Semiconductor and Hardware Design",
+        "topic_keywords": ["semiconductor", "hardware design", "AI infrastructure"],
+    }
+    accepted, rejected, stats = gd.apply_quality_gate([item], "strict")
+    assert accepted == []
+    assert rejected[0]["rejection_reason"] == "topic_mismatch"
+    assert stats["rejection_reasons"] == {"topic_mismatch": 1}
+
+
 def test_apply_quality_gate_keeps_shared_domain_feature_importance_item():
     item = {
         "id": "shared-domain",
@@ -737,7 +760,7 @@ def test_apply_quality_gate_keeps_related_cross_domain_hft_item():
     item = {
         "id": "related-topic",
         "question": "What did the findings suggest about traditional technical indicators in high-frequency markets?",
-        "answer": "They may have diminishing predictive value in modern high-frequency markets.",
+        "answer": "They may have lower predictive value in modern high-frequency markets.",
         "context_source": "These findings suggest that traditional technical indicators may have diminishing predictive value in modern high-frequency markets.",
         "context_source_verified": True,
         "topic": "High-Frequency Trading and Market Microstructure",
@@ -839,6 +862,18 @@ def test_build_dataset_audit_reports_topic_and_split_warnings():
     assert "val_split_has_single_topic" in audit["warnings"]
 
 
+def test_build_dataset_audit_includes_expected_composite_topics_without_rows():
+    audit = gd.build_dataset_audit(
+        accepted_rows=[{"document": "doc-a.pdf", "topic_id": "topic-00"}],
+        rejected_rows=[],
+        train_rows=[],
+        val_rows=[],
+        test_rows=[],
+        expected_topic_ids=["doc-a.pdf::topic-00", "doc-b.pdf::topic-00"],
+    )
+    assert "doc-b.pdf::topic-00" in audit["topics_without_accepted"]
+
+
 # --- judge audit ------------------------------------------------------
 
 def test_build_judge_messages_payload_contains_only_essential_fields():
@@ -901,6 +936,52 @@ def test_audit_items_per_document_produces_same_judged_rows(monkeypatch):
     assert {item["id"] for item in by_document} == {item["id"] for item in all_at_once}
     assert stats["judged_items"] == 3
     assert stats["decision_counts"] == {"pass": 3}
+
+
+def test_audit_items_per_document_uses_requested_stats_mode(monkeypatch):
+    def fake_audit(batch, model, temperature, seed):  # noqa: ARG001
+        judged = [
+            {
+                **item,
+                "judge_score": 1.0,
+                "judge_context_quality": 1.0,
+                "judge_answer_support": 1.0,
+                "judge_question_quality": 1.0,
+                "judge_decision": "pass",
+                "judge_reasons": ["factual"],
+                "judge_explanation": "ok",
+                "judge_model": model,
+            }
+            for item in batch
+        ]
+        return judged, gd.build_judge_stats("audit", model, judged)
+
+    monkeypatch.setattr(gd, "audit_items_with_judge", fake_audit)
+    _, stats = gd.audit_items_with_judge_by_document(
+        [{"id": "a", "document": "doc.pdf"}],
+        model="judge-model",
+        temperature=0.0,
+        mode="filter",
+    )
+    assert stats["mode"] == "filter"
+
+
+def test_filter_rows_by_judge_keeps_only_passed_rows():
+    rows = [
+        {"id": "pass", "question": "q1"},
+        {"id": "fail", "question": "q2"},
+        {"id": "review", "question": "q3"},
+    ]
+    judged = [
+        {**rows[0], "judge_decision": "pass", "judge_reasons": ["factual"]},
+        {**rows[1], "judge_decision": "fail", "judge_reasons": ["unsupported_detail"]},
+        {**rows[2], "judge_decision": "review", "judge_reasons": ["overly_extractive"]},
+    ]
+    passed, rejected = gd.filter_rows_by_judge(rows, judged)
+    assert passed == [rows[0]]
+    assert [row["id"] for row in rejected] == ["fail", "review"]
+    assert rejected[0]["rejection_reason"] == "judge_fail:unsupported_detail"
+    assert rejected[1]["rejection_reason"] == "judge_fail:overly_extractive"
 
 
 def test_normalize_judge_result_coerces_valid_public_fields():
@@ -1478,6 +1559,19 @@ def test_has_verbatim_answer_accepts_short_reformulated_answer():
         "context_source": context,
     }
     assert gd.has_verbatim_answer(item) is False
+
+
+def test_has_verbatim_answer_detects_short_copied_phrase():
+    context = (
+        "The trade-off between controllability and efficiency leads to the question: "
+        "does an ideal action space which strikes a balance between these aspects exist?"
+    )
+    item = {
+        "question": "What is the primary trade-off?",
+        "answer": "The trade-off is between controllability and efficiency.",
+        "context_source": context,
+    }
+    assert gd.has_verbatim_answer(item) is True
 
 
 def test_apply_quality_gate_rejects_verbatim_answer():
