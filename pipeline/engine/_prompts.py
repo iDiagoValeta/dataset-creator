@@ -260,6 +260,111 @@ Context:
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
+def build_evidence_generation_messages(
+    document: str,
+    topic: Topic,
+    evidence: str,
+    language: str,
+    existing_questions: Sequence[str],
+    repair_feedback: str = "",
+) -> list[dict[str, str]]:
+    """Create a one-evidence prompt for evidence-first Q/A generation."""
+    system_prompt = (
+        "You generate high-quality supervised Q/A datasets from a fixed evidence passage. "
+        "Return strict JSON only. No markdown. No extra keys."
+    )
+    sampled_existing = _sample_existing_questions(existing_questions, max(40, len(existing_questions)))
+    existing_block = "\n".join(f"- {q}" for q in sampled_existing)
+    repair_block = f"\nRepair instruction: {repair_feedback}\n" if repair_feedback else ""
+    user_prompt = f"""
+Generate exactly one Q/A item for the topic below.
+Language for question and answer: {language}.
+Use that language for every question and answer, even if the prompt instructions are in English.
+
+Output format (strict JSON object):
+{{
+  "items": [
+    {{
+      "question": "string",
+      "answer": "string",
+      "type": "factual|conceptual|inference|compare|definition",
+      "difficulty": "easy|medium|hard"
+    }}
+  ]
+}}
+
+Rules:
+- Use only the fixed evidence passage. Do not use outside knowledge or nearby context.
+- The answer must be brief, natural, and strictly deducible from the evidence alone.
+- The answer must reformulate the evidence. Do not copy a full phrase verbatim.
+- Do not add terms, numbers, entities, conclusions, or examples absent from the evidence.
+- Avoid asking about figures, tables, images, references, citations, or degraded notation.
+- Do not repeat semantics from Existing dataset questions.
+- If the evidence is not sufficient, still create the safest narrow factual question it supports.
+{repair_block}
+Document: {document}
+Topic: {topic.name}
+Topic summary: {topic.summary}
+Topic keywords: {", ".join(topic.keywords)}
+
+Existing dataset questions:
+{existing_block if existing_block else "- (none yet)"}
+
+Fixed evidence:
+\"\"\"
+{evidence}
+\"\"\"
+""".strip()
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def build_evidence_seed_question_messages(
+    document: str,
+    question: str,
+    evidence: str,
+    language: str,
+    repair_feedback: str = "",
+) -> list[dict[str, str]]:
+    """Create a one-evidence prompt to answer a user-supplied seed question."""
+    system_prompt = (
+        "You answer a fixed question from one fixed evidence passage. "
+        "Return strict JSON only. No markdown. No extra keys."
+    )
+    repair_block = f"\nRepair instruction: {repair_feedback}\n" if repair_feedback else ""
+    user_prompt = f"""
+Answer the fixed question using only the fixed evidence passage.
+Language for the answer: {language}.
+The question field must reproduce the exact question given; do not rephrase it.
+
+Output format (strict JSON object):
+{{
+  "items": [
+    {{
+      "question": "the exact question reproduced verbatim",
+      "answer": "string",
+      "type": "factual|conceptual|inference|compare|definition",
+      "difficulty": "easy|medium|hard"
+    }}
+  ]
+}}
+
+Rules:
+- Use only the fixed evidence passage. Do not use outside knowledge or nearby context.
+- The answer must be brief, natural, and strictly deducible from the evidence alone.
+- Do not add terms, numbers, entities, conclusions, or examples absent from the evidence.
+- If the evidence does not answer the question, return an answer that says the evidence does not provide enough information.
+{repair_block}
+Document: {document}
+Question: {question}
+
+Fixed evidence:
+\"\"\"
+{evidence}
+\"\"\"
+""".strip()
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
 def build_seed_question_messages(
     document: str,
     question: str,
