@@ -38,6 +38,13 @@ _DOMAIN_TERMS: dict[str, set[str]] = {
     },
 }
 
+_GENERIC_TOPIC_TERMS: frozenset[str] = frozenset({
+    "approach", "approaches", "analysis", "applications", "based", "chapter",
+    "concept", "concepts", "design", "document", "framework", "general",
+    "implementation", "introduction", "method", "methods", "overview", "paper",
+    "section", "study", "system", "systems", "topic", "topics", "using",
+})
+
 
 def clean_context_artifacts(text: str) -> str:
     """Remove inline extraction artifacts while preserving readable evidence text."""
@@ -240,6 +247,8 @@ def has_quality_artifact(item: dict[str, Any]) -> bool:
         return True
     if re.search(r"\b(?:references|bibliography)\b", str(item.get("context_excerpt", "")).lower()):
         return True
+    if re.search(r"(?:^|\s)(?:---\s*){2,}", str(item.get("context_source", ""))):
+        return True
     if "forthcoming" in str(item.get("context_source", "")).lower():
         return True
     if re.search(r"\b\d{2,3}\s+(computer|medical|process|memory|device|system)\b", text):
@@ -307,24 +316,17 @@ def _answer_bigrams(text: str) -> frozenset:
     return frozenset(zip(words, words[1:], strict=False))
 
 
-def has_verbatim_answer(item: dict[str, Any], threshold: float = 0.75) -> bool:
+def has_verbatim_answer(item: dict[str, Any], threshold: float = 0.70) -> bool:
     """Return True when the answer is a near-verbatim copy of context_source.
 
-    Uses bigram Jaccard coverage of the answer over context_source.  Only
-    triggers when both texts are long enough for a meaningful comparison AND
-    the answer is at least 75% of the context length — short concise answers
-    that paraphrase a single sentence are expected to share many bigrams and
-    should not be penalised.
+    Uses bigram coverage of the answer over context_source. Short answers can
+    still be over-extractive when they copy the exact evidence phrase.
     """
     answer = normalize_whitespace(str(item.get("answer", "")))
     context = normalize_whitespace(str(item.get("context_source", "")))
     answer_words = answer.split()
     context_words = context.split()
-    if len(answer_words) < 8 or len(context_words) < 10:
-        return False
-    # A short answer that summarises the context is fine; only flag when the
-    # answer is almost as long as the context itself (likely a copy-paste).
-    if len(answer_words) < 0.75 * len(context_words):
+    if len(answer_words) < 6 or len(context_words) < 10:
         return False
     ab = _answer_bigrams(answer)
     cb = _answer_bigrams(context)
@@ -349,8 +351,33 @@ def _topic_domains(item: dict[str, Any]) -> set[str]:
     return {domain for domain, score in scores.items() if score > 0}
 
 
+def _topic_alignment_terms(item: dict[str, Any]) -> set[str]:
+    topic_text = " ".join(
+        [
+            str(item.get("topic", "")),
+            str(item.get("topic_summary", "")),
+            " ".join(str(k) for k in item.get("topic_keywords", []) if k),
+        ]
+    )
+    return {
+        term
+        for term in _normalized_terms(topic_text)
+        if term not in _GENERIC_TOPIC_TERMS and len(term) >= 4
+    }
+
+
 def has_topic_mismatch(item: dict[str, Any]) -> bool:
     """Detect clear cases where an item belongs to another discovered topic."""
+    topic_terms = _topic_alignment_terms(item)
+    has_keywords = bool(item.get("topic_keywords"))
+    if len(topic_terms) >= 2 and (has_keywords or len(topic_terms) >= 4):
+        item_terms = _normalized_terms(
+            " ".join(str(item.get(key, "")) for key in ("question", "answer", "context_source"))
+        )
+        shared = topic_terms & item_terms
+        if not shared:
+            return True
+
     topic_domains = _topic_domains(item)
     if not topic_domains:
         return False
@@ -410,13 +437,13 @@ def audit_item_quality(item: dict[str, Any]) -> str | None:
         return "truncated_context_source"
     if has_first_person_answer(item):
         return "first_person_answer"
-    if has_insufficient_context_support(item):
-        return "insufficient_context_support"
     if has_topic_mismatch(item):
         return "topic_mismatch"
-    # Verbatim check last: content errors take priority over reformulation quality.
+    # Verbatim check before lexical support so copy-paste defects are visible.
     if has_verbatim_answer(item):
         return "verbatim_answer"
+    if has_insufficient_context_support(item):
+        return "insufficient_context_support"
     return None
 
 
