@@ -37,7 +37,7 @@ MIN_TOPIC_CONTEXT_CHARS = 9000
 VALID_TYPES: frozenset[str] = frozenset({"factual", "conceptual", "inference", "compare", "definition"})
 VALID_DIFFICULTIES: frozenset[str] = frozenset({"easy", "medium", "hard"})
 VALID_QUALITY_GATES: frozenset[str] = frozenset({"strict", "balanced", "off"})
-VALID_JUDGE_MODES: frozenset[str] = frozenset({"audit", "off"})
+VALID_JUDGE_MODES: frozenset[str] = frozenset({"audit", "filter", "off"})
 
 STOPWORDS: frozenset[str] = frozenset({
     "cual", "como", "para", "este", "esta", "estos", "estas", "sobre",
