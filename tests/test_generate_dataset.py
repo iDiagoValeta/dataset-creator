@@ -322,20 +322,22 @@ def test_filter_pdfs_by_only_doc_multiple_partial_miss_raises(tmp_path: Path):
 # --- context_source validation ---------------------------------------
 
 def test_context_source_verified_flag_when_substring(monkeypatch):
-    """Items whose context_source is a literal substring of context keep the claim."""
+    """Evidence-first items use a literal context_source selected by code."""
     topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=["k"])
-    context = "The kernel schedules processes and allocates memory fairly."
+    context = (
+        "[doc-chunk-0000] The kernel schedules processes and allocates memory fairly "
+        "for every active program."
+    )
 
     def fake_call(*_, **__):
         return (
             {
                 "items": [
                     {
-                        "question": "q",
-                        "answer": "a",
+                        "question": "What does the kernel do for active programs?",
+                        "answer": "It schedules processes and manages memory.",
                         "type": "factual",
                         "difficulty": "hard",
-                        "context_source": "schedules processes",
                     }
                 ]
             },
@@ -354,10 +356,12 @@ def test_context_source_verified_flag_when_substring(monkeypatch):
         existing_questions=[],
     )
     assert items[0]["context_source_verified"] is True
-    assert items[0]["context_source"] == "The kernel schedules processes and allocates memory fairly."
+    assert items[0]["context_source"] == (
+        "The kernel schedules processes and allocates memory fairly for every active program."
+    )
     assert items[0]["document_language"] == "es"
     assert items[0]["difficulty"] == "hard"
-    assert items[0]["source_chunk_ids"] == []
+    assert items[0]["source_chunk_ids"] == ["doc-chunk-0000"]
 
 
 def test_generated_item_excerpt_uses_verified_source_chunk(monkeypatch):
@@ -373,10 +377,9 @@ def test_generated_item_excerpt_uses_verified_source_chunk(monkeypatch):
                 "items": [
                     {
                         "question": "q",
-                        "answer": "negative Sortino ratios",
+                        "answer": "They indicate weak downside protection and consistently negative Sortino ratios.",
                         "type": "factual",
                         "difficulty": "medium",
-                        "context_source": "negative Sortino ratios and weak downside protection",
                     }
                 ]
             },
@@ -550,17 +553,17 @@ def test_infer_resume_counts_recomputes_chunk_count_when_configured(tmp_path: Pa
     ) == (5, 1)
 
 
-def test_context_source_falls_back_when_not_substring(monkeypatch):
+def test_evidence_first_ignores_model_context_source(monkeypatch):
     topic = gd.Topic(topic_id="topic-00", name="T", summary="s", keywords=[])
-    context = "Pagination avoids fragmentation."
+    context = "[doc-chunk-0000] Pagination avoids fragmentation by dividing memory into fixed-size pages for allocation."
 
     def fake_call(*_, **__):
         return (
             {
                 "items": [
                     {
-                        "question": "q",
-                        "answer": "a",
+                        "question": "How does pagination avoid fragmentation?",
+                        "answer": "It divides memory into fixed-size pages to avoid fragmentation.",
                         "type": "bogus",
                         "difficulty": "extreme",
                         "context_source": "literal fabrication not in source",
@@ -581,7 +584,7 @@ def test_context_source_falls_back_when_not_substring(monkeypatch):
         temperature=0.0,
         existing_questions=[],
     )
-    assert items[0]["context_source_verified"] is False
+    assert items[0]["context_source_verified"] is True
     assert items[0]["type"] == "factual"          # bogus type normalized
     assert items[0]["difficulty"] == "medium"     # bogus difficulty normalized
     assert items[0]["context_source"].startswith("Pagination")
@@ -1618,3 +1621,414 @@ def test_build_dataset_audit_uses_doc_topic_composite_key():
     assert "doc_b.pdf::topic-00" in audit["accepted_by_topic"]
     assert audit["accepted_by_topic"]["doc_a.pdf::topic-00"] == 1
     assert audit["accepted_by_topic"]["doc_b.pdf::topic-00"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Group F — multi-topic retrieval, reassignment, dedup breakdown,
+# context cleanup, backfill iteration and coverage metrics.
+# ---------------------------------------------------------------------------
+
+def test_score_chunk_for_topic_penalizes_overlap_with_other_topics():
+    chunk_unique = gd.Chunk(
+        chunk_id="d-chunk-0001",
+        document="d.pdf",
+        text="Energy and carbon measurement metrics quantify CO2e emissions per kWh.",
+    )
+    chunk_shared = gd.Chunk(
+        chunk_id="d-chunk-0002",
+        document="d.pdf",
+        text=(
+            "Energy and carbon measurement metrics overlap with broad strategies "
+            "for sustainability programs."
+        ),
+    )
+    target = gd.Topic(
+        topic_id="topic-00",
+        name="Energy and Carbon Measurement Metrics",
+        summary="CO2e and kWh accounting.",
+        keywords=["energy", "carbon", "metrics", "CO2e"],
+    )
+    sibling = gd.Topic(
+        topic_id="topic-01",
+        name="Strategies",
+        summary="Broad sustainability strategies and programs.",
+        keywords=["strategies", "sustainability", "programs"],
+    )
+    score_unique = gd.score_chunk_for_topic(chunk_unique, target, all_topics=[target, sibling])
+    score_shared = gd.score_chunk_for_topic(chunk_shared, target, all_topics=[target, sibling])
+    assert score_unique > score_shared
+    raw_unique = gd.score_chunk_for_topic(chunk_unique, target)
+    assert score_unique <= raw_unique
+
+
+def test_build_topic_context_skips_literal_match_when_topic_name_is_widespread():
+    chunks = [
+        gd.Chunk("d-chunk-0001", "d.pdf", "Strategies appear early in the document."),
+        gd.Chunk("d-chunk-0002", "d.pdf", "Several Strategies are discussed in the middle."),
+        gd.Chunk("d-chunk-0003", "d.pdf", "More Strategies and metrics."),
+        gd.Chunk(
+            "d-chunk-0004",
+            "d.pdf",
+            "CO2e per kWh is the standard energy and carbon measurement metric.",
+        ),
+    ]
+    topic_strategies = gd.Topic(
+        topic_id="topic-00",
+        name="Strategies",
+        summary="Document-level strategies.",
+        keywords=["strategies"],
+    )
+    topic_metrics = gd.Topic(
+        topic_id="topic-01",
+        name="Energy and Carbon Measurement Metrics",
+        summary="CO2e and kWh accounting.",
+        keywords=["CO2e", "kWh", "metrics", "energy"],
+    )
+    ctx_metrics = gd.build_topic_context(
+        chunks,
+        topic_metrics,
+        max_topic_context_chars=10_000,
+        all_topics=[topic_strategies, topic_metrics],
+    )
+    assert "d-chunk-0004" in ctx_metrics
+    # The literal-match heuristic should NOT trigger for "Strategies" because
+    # the name appears in 3 different chunks (ambiguous match).
+    ctx_strategies = gd.build_topic_context(
+        chunks,
+        topic_strategies,
+        max_topic_context_chars=10_000,
+        all_topics=[topic_strategies, topic_metrics],
+    )
+    # When ambiguous the context falls back to scoring; the metrics chunk has
+    # zero raw score for "Strategies" so it should not dominate.
+    assert ctx_strategies != ""
+
+
+def test_reassign_topic_moves_item_to_better_topic():
+    item = {
+        "id": "co2-1",
+        "topic_id": "topic-00",
+        "topic": "Strategies",
+        "topic_summary": "Broad sustainability strategies.",
+        "topic_keywords": ["strategies"],
+        "question": "What is CO2e per kWh used for?",
+        "answer": "CO2e per kWh is used to measure carbon intensity of energy.",
+        "context_source": "CO2e per kWh quantifies the carbon intensity of electricity.",
+        "document": "doc.pdf",
+    }
+    candidates = [
+        {
+            "topic_id": "topic-00",
+            "name": "Strategies",
+            "summary": "Broad sustainability strategies.",
+            "keywords": ["strategies", "sustainability", "programs"],
+        },
+        {
+            "topic_id": "topic-01",
+            "name": "Energy and Carbon Measurement Metrics",
+            "summary": "CO2e and kWh accounting.",
+            "keywords": ["CO2e", "kWh", "carbon", "energy"],
+        },
+    ]
+    updated, action = gd.reassign_or_reject_topic(item, candidates)
+    assert action == "reassigned"
+    assert updated["topic_id"] == "topic-01"
+    assert "reassigned_from" in updated
+    assert updated["reassigned_from"]["topic_id"] == "topic-00"
+
+
+def test_reassign_topic_keeps_item_when_no_clear_winner():
+    item = {
+        "topic_id": "topic-00",
+        "topic": "Risk metrics",
+        "topic_summary": "Risk metrics summary",
+        "topic_keywords": ["risk", "volatility"],
+        "question": "What does the Sortino ratio measure?",
+        "answer": "Downside risk relative to a target.",
+        "context_source": "The Sortino ratio measures downside risk.",
+        "document": "doc.pdf",
+    }
+    candidates = [
+        {
+            "topic_id": "topic-00",
+            "name": "Risk metrics",
+            "summary": "Risk metrics summary",
+            "keywords": ["risk", "downside", "volatility"],
+        },
+        {
+            "topic_id": "topic-01",
+            "name": "Performance metrics",
+            "summary": "Performance metrics",
+            "keywords": ["performance", "returns"],
+        },
+    ]
+    _, action = gd.reassign_or_reject_topic(item, candidates)
+    assert action is None
+
+
+def test_reassign_topic_rejects_when_no_topic_matches():
+    item = {
+        "topic_id": "topic-00",
+        "topic": "Geography",
+        "topic_summary": "Geography summary",
+        "topic_keywords": ["geography"],
+        "question": "Why does the boiling point of water depend on altitude?",
+        "answer": "Atmospheric pressure decreases with altitude, lowering the boiling point.",
+        "context_source": "Atmospheric pressure decreases with altitude.",
+        "document": "doc.pdf",
+    }
+    candidates = [
+        {
+            "topic_id": "topic-00",
+            "name": "Geography",
+            "summary": "Geography summary",
+            "keywords": ["geography"],
+        },
+        {
+            "topic_id": "topic-01",
+            "name": "Cooking traditions",
+            "summary": "Regional cooking",
+            "keywords": ["cooking", "recipe", "traditions"],
+        },
+    ]
+    _, action = gd.reassign_or_reject_topic(item, candidates)
+    assert action == "topic_mismatch_reassign"
+
+
+def test_apply_topic_reassignment_aggregates_stats():
+    items = [
+        {
+            "topic_id": "topic-00",
+            "topic": "Strategies",
+            "topic_keywords": ["strategies"],
+            "question": "What is CO2e per kWh used for?",
+            "answer": "Carbon intensity of energy.",
+            "context_source": "CO2e per kWh quantifies the carbon intensity of electricity.",
+            "document": "d.pdf",
+        }
+    ]
+    topics_by_doc = {
+        "d.pdf": [
+            {
+                "topic_id": "topic-00",
+                "name": "Strategies",
+                "summary": "Strategies",
+                "keywords": ["strategies"],
+            },
+            {
+                "topic_id": "topic-01",
+                "name": "Energy and Carbon Measurement Metrics",
+                "summary": "CO2e and kWh accounting.",
+                "keywords": ["CO2e", "kWh", "carbon", "energy"],
+            },
+        ]
+    }
+    kept, rejected, stats = gd.apply_topic_reassignment(items, topics_by_doc)
+    assert len(kept) == 1
+    assert kept[0]["topic_id"] == "topic-01"
+    assert rejected == []
+    assert stats["reassigned"] == 1
+
+
+def test_dedupe_breakdown_separates_reasons():
+    items = [
+        {"question": "What is X?", "answer": "A definition."},
+        {"question": "What is X?", "answer": "A definition."},  # exact dup
+        {
+            "question": "How does feature importance work in random forests?",
+            "answer": "It ranks variables by mean decrease in impurity.",
+        },
+        {
+            "question": "How does feature importance behave in random forests?",
+            "answer": "It ranks variables by mean decrease in impurity.",
+        },
+    ]
+    unique, breakdown = gd.deduplicate_items(items, return_stats=True)
+    assert len(unique) == 2
+    assert breakdown["duplicate_exact"] >= 1
+    assert (
+        breakdown["duplicate_semantic_question"]
+        + breakdown["duplicate_semantic_qa"]
+        + breakdown["duplicate_semantic_answer"]
+        >= 1
+    )
+
+
+def test_dedupe_collapses_paraphrased_quality_culture_pair():
+    items = [
+        {
+            "question": "How can a quality culture be promoted in healthcare organizations?",
+            "answer": "By aligning leadership, training and continuous feedback loops.",
+        },
+        {
+            "question": "What practices help foster a quality culture in healthcare?",
+            "answer": "Aligning leadership, training programs and continuous feedback loops.",
+        },
+    ]
+    unique = gd.deduplicate_items(items)
+    assert len(unique) == 1
+
+
+def test_chunk_filter_excludes_chunk_with_truncated_word_and_capitalized_next():
+    """A chunk that begins inside a cut word should be skipped when other chunks exist."""
+    from engine._topics import _chunk_is_too_noisy_for_topic_context
+    bad = gd.Chunk(
+        chunk_id="d-chunk-0001",
+        document="d.pdf",
+        text="vailability Acceptance is described in the next paragraph as a key metric.",
+    )
+    assert _chunk_is_too_noisy_for_topic_context(bad) is True
+
+
+def test_collect_evidence_windows_keeps_literal_complete_sentences():
+    topic = gd.Topic(
+        topic_id="topic-00",
+        name="Kernel scheduling",
+        summary="Process scheduling and memory allocation.",
+        keywords=["kernel", "scheduling", "memory"],
+    )
+    context = (
+        "[doc-chunk-0000] raining run has similarly increased by orders of magnitude. "
+        "The kernel schedules processes and allocates memory fairly for every active program. "
+        "References Smith, 2020."
+    )
+    windows, stats = gd.collect_evidence_windows(context, topic)
+    assert stats["candidate_windows"] >= 1
+    assert any("The kernel schedules processes" in window.text for window in windows)
+    assert all(not window.text.startswith("raining run") for window in windows)
+    assert all("References" not in window.text for window in windows)
+    assert all(window.chunk_id == "doc-chunk-0000" for window in windows)
+
+
+def test_evidence_first_repairs_verbatim_answer(monkeypatch):
+    topic = gd.Topic(topic_id="topic-00", name="Kernel scheduling", summary="s", keywords=["kernel"])
+    context = (
+        "[doc-chunk-0000] The kernel schedules processes and allocates memory fairly "
+        "for every active program."
+    )
+    calls = {"count": 0}
+
+    def fake_call(*_, **__):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            answer = "The kernel schedules processes and allocates memory fairly for every active program."
+        else:
+            answer = "It schedules processes and manages memory."
+        return (
+            {
+                "items": [
+                    {
+                        "question": "What does the kernel do for active programs?",
+                        "answer": answer,
+                        "type": "factual",
+                        "difficulty": "medium",
+                    }
+                ]
+            },
+            "",
+        )
+
+    monkeypatch.setattr("engine._generation.call_ollama_json", fake_call)
+    items, debug = gd.generate_items_for_topic(
+        model="m",
+        document="doc.pdf",
+        topic=topic,
+        topic_context=context,
+        language="en",
+        questions_per_topic=1,
+        temperature=0.0,
+        existing_questions=[],
+    )
+    assert len(items) == 1
+    assert calls["count"] == 2
+    assert debug["evidence_first"]["repair_attempts"] == 1
+    assert items[0]["context_source_verified"] is True
+
+
+def test_seed_question_mode_uses_ranked_evidence_without_rephrasing(monkeypatch):
+    topic = gd.Topic(
+        topic_id="seed-00",
+        name="How does pagination avoid fragmentation?",
+        summary="seed",
+        keywords=[],
+    )
+    context = "[doc-chunk-0000] Pagination avoids fragmentation by dividing memory into fixed-size pages for allocation."
+
+    def fake_call(*_, **__):
+        return (
+            {
+                "items": [
+                    {
+                        "question": "rephrased by model",
+                        "answer": "It divides memory into fixed-size pages to avoid fragmentation.",
+                        "type": "conceptual",
+                        "difficulty": "easy",
+                    }
+                ]
+            },
+            "",
+        )
+
+    monkeypatch.setattr("engine._generation.call_ollama_json", fake_call)
+    items, _ = gd.generate_items_for_topic(
+        model="m",
+        document="doc.pdf",
+        topic=topic,
+        topic_context=context,
+        language="en",
+        questions_per_topic=1,
+        temperature=0.0,
+        existing_questions=[],
+        seed_question_mode=True,
+    )
+    assert items[0]["question"] == topic.name
+    assert items[0]["context_source_verified"] is True
+
+
+def test_quality_artifact_rejects_dangling_section_letter_ending():
+    item = {
+        "question": "What does the section discuss?",
+        "answer": "It discusses background concepts.",
+        "context_source": "The section discusses background concepts and motivation. C.",
+        "topic": "Background",
+    }
+    assert gd.has_quality_artifact(item) is True
+
+
+def test_audit_includes_coverage_ratio_and_pipeline_success():
+    audit = gd.build_dataset_audit(
+        accepted_rows=[
+            {"document": "a.pdf", "topic_id": "topic-00"},
+            {"document": "a.pdf", "topic_id": "topic-00"},
+            {"document": "a.pdf", "topic_id": "topic-01"},
+        ],
+        rejected_rows=[],
+        train_rows=[
+            {"document": "a.pdf", "topic_id": "topic-00"},
+            {"document": "a.pdf", "topic_id": "topic-01"},
+        ],
+        val_rows=[{"document": "a.pdf", "topic_id": "topic-00"}],
+        test_rows=[],
+        expected_topic_ids=["a.pdf::topic-00", "a.pdf::topic-01"],
+    )
+    assert "coverage_ratio" in audit
+    assert audit["coverage_ratio"] == 1.0
+    assert "pipeline_success" in audit
+    assert audit["pipeline_success"] is True
+    assert "multi_doc_in_splits" in audit
+    assert audit["multi_doc_in_splits"]["train"] is False
+
+
+def test_audit_pipeline_success_false_when_coverage_low():
+    audit = gd.build_dataset_audit(
+        accepted_rows=[{"document": "a.pdf", "topic_id": "topic-00"}],
+        rejected_rows=[{"document": "a.pdf", "topic_id": "topic-99"}],
+        train_rows=[],
+        val_rows=[],
+        test_rows=[],
+        expected_topic_ids=[
+            f"a.pdf::topic-{i:02d}" for i in range(10)
+        ],
+    )
+    assert audit["coverage_ratio"] < 0.5
+    assert audit["pipeline_success"] is False
