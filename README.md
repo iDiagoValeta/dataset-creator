@@ -10,6 +10,10 @@ This repository automates that workflow end-to-end: extract text from PDFs, dete
 
 The pipeline extracts text, detects the document language, maps topics, selects literal evidence windows from each PDF, generates Q/A pairs from those fixed windows, applies quality checks, deduplicates rows, and exports JSONL train/val/test splits with traceability back to source chunks. Optionally, `--judge audit` adds a final factuality audit over accepted rows without changing the main dataset, while `--judge filter` removes judge failures from the final JSONL.
 
+## Example of creating a dataset from 6 documents on my personal computer
+
+<img width="1919" height="1031" alt="Captura de pantalla 2026-05-03 235644" src="https://github.com/user-attachments/assets/c0430004-bc26-4a61-ab35-8b553f8e2d72" />
+
 ## Quick Start
 
 Requirements:
