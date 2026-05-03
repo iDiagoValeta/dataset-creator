@@ -34,7 +34,7 @@ BLOCKING_REASONS: frozenset[str] = frozenset({
 _CHUNK_MARKER_RE = re.compile(r"\[[\w.-]+-chunk-\d{4,}\]")
 
 
-def _is_verbatim_answer(answer: str, context_source: str, threshold: float = 0.80) -> bool:
+def _is_verbatim_answer(answer: str, context_source: str, threshold: float = 0.70) -> bool:
     """Bigram-Jaccard verbatim check used by the judge pre-checks."""
     aw = re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", answer.lower())
     cw = re.findall(r"[A-Za-zÀ-ÿ0-9]{3,}", context_source.lower())
@@ -81,7 +81,7 @@ def _deterministic_judge_prechecks(item: dict[str, Any]) -> dict[str, Any] | Non
         }
 
     # Check 3: answer is a near-verbatim copy of context_source.
-    if _is_verbatim_answer(answer, context_source, threshold=0.80):
+    if _is_verbatim_answer(answer, context_source, threshold=0.70):
         return {
             "context_quality": 0.8,
             "answer_support": 0.9,
