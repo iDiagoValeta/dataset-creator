@@ -4,7 +4,7 @@ DatasetCreator -- Topic-aware synthetic dataset generation from PDF documents.
 The pipeline is optimized for local execution with Ollama and long-context models:
     1) Extract text from PDFs (text only; no images/tables processing)
     2) Build a global topic map per document using large context windows
-    3) Generate Q/A items per topic while avoiding duplicates
+    3) Select literal evidence windows and generate Q/A items from each fixed evidence
     4) Export structured JSONL datasets and train/val/test splits
 
 Usage:
@@ -21,6 +21,7 @@ Dependencies:
 # Re-export all public symbols from engine submodules so that callers and tests
 # can continue to use `import generate_dataset as gd; gd.Chunk`, `gd.parse_split`, etc.
 import json
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -74,6 +75,10 @@ from engine._config import (  # noqa: F401
     Topic,
     logger,
 )
+from engine._evidence import (  # noqa: F401
+    EvidenceWindow,
+    collect_evidence_windows,
+)
 from engine._export import (  # noqa: F401
     _assert_safe_cleanup_root,
     _current_git_commit,
@@ -113,6 +118,8 @@ from engine._pdf import (  # noqa: F401
     extract_text_from_pdf,
 )
 from engine._prompts import (  # noqa: F401
+    build_evidence_generation_messages,
+    build_evidence_seed_question_messages,
     build_representative_document_context,
     build_seed_question_messages,
     build_topic_generation_messages,
@@ -125,6 +132,7 @@ from engine._quality import (  # noqa: F401
     _content_words,
     _question_bigrams,
     apply_quality_gate,
+    apply_topic_reassignment,
     audit_item_quality,
     clean_context_artifacts,
     context_excerpt_for_fragment,
@@ -135,6 +143,8 @@ from engine._quality import (  # noqa: F401
     has_topic_mismatch,
     has_verbatim_answer,
     is_circular_answer,
+    reassign_or_reject_topic,
+    score_item_against_topic,
     source_chunk_ids_for_fragment,
 )
 from engine._text import (  # noqa: F401
@@ -226,6 +236,39 @@ def filter_rows_by_judge(
         reject_row["rejection_reason"] = f"judge_fail:{reason}"
         rejected.append(reject_row)
     return passed, rejected
+
+
+def new_evidence_first_stats() -> dict[str, int]:
+    """Return zeroed evidence-first counters for metadata."""
+    return {
+        "candidate_windows": 0,
+        "attempted_windows": 0,
+        "accepted_from_evidence": 0,
+        "repair_attempts": 0,
+        "discarded_windows": 0,
+        "evidence_exhausted_topics": 0,
+    }
+
+
+def merge_evidence_first_stats(target: dict[str, int], source: dict[str, Any] | None) -> None:
+    """Add generation evidence-first counters into ``target`` in place."""
+    if not source:
+        return
+    for key in target:
+        target[key] += int(source.get(key, 0) or 0)
+
+
+def refresh_quality_counts(
+    quality_stats: dict[str, Any],
+    accepted_rows: list[dict[str, Any]],
+    rejected_rows: list[dict[str, Any]],
+) -> None:
+    """Refresh count fields after dedupe or judge filtering."""
+    verified = sum(1 for item in accepted_rows if item.get("context_source_verified"))
+    quality_stats["accepted_items"] = len(accepted_rows)
+    quality_stats["rejected_items"] = len(rejected_rows)
+    quality_stats["verified_items"] = verified
+    quality_stats["verified_ratio"] = round(verified / len(accepted_rows), 4) if accepted_rows else 0.0
 
 
 def infer_resume_counts(
@@ -336,6 +379,7 @@ def main() -> None:
     total_topics = 0
     resumed_docs = 0
     document_languages: dict[str, str] = {}
+    evidence_first_stats = new_evidence_first_stats()
 
     for pdf_index, pdf_path in enumerate(pdf_files, start=1):
         print(f"[{pdf_index}/{len(pdf_files)}] Procesando documento: {pdf_path.name}")
@@ -537,6 +581,7 @@ def main() -> None:
                 retrieval_mode=getattr(args, "retrieval", "lexical"),
                 embedding_model=getattr(args, "embedding_model", DEFAULT_EMBEDDING_MODEL),
                 embedding_cache=chunk_embedding_cache,
+                all_topics=topics,
             )
             if not topic_context.strip():
                 print(" -> 0 items (sin contexto)")
@@ -561,7 +606,9 @@ def main() -> None:
                 seed=args.seed,
                 document_language=document_language,
                 seed_question_mode=seed_question_mode_active,
+                all_topics=topics,
             )
+            merge_evidence_first_stats(evidence_first_stats, topic_debug.get("evidence_first"))
             topic_elapsed = time.time() - topic_t0
             generated.extend(topic_items)
             doc_items.extend(topic_items)
@@ -574,6 +621,9 @@ def main() -> None:
                     "topic_context": topic_context,
                     "language": generation_language,
                     "document_language": document_language,
+                    "chunks": list(chunks),
+                    "embedding_cache": chunk_embedding_cache,
+                    "attempted_context_sources": list(topic_debug.get("attempted_context_sources", [])),
                 }
             )
             print(f" -> {len(topic_items)} items ({topic_elapsed:.1f}s)")
@@ -584,6 +634,7 @@ def main() -> None:
                     "topic_keywords": topic.keywords,
                     "topic_context_chars": len(topic_context),
                     "generated_items": len(topic_items),
+                    "evidence_windows": topic_debug.get("evidence_windows", []),
                     "raw": topic_debug,
                 }
             )
@@ -592,47 +643,195 @@ def main() -> None:
         write_metadata(debug_path, doc_debug)
         save_checkpoint_items(args.debug_dir, pdf_path, doc_items)
 
+    topics_by_document: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    seen_topic_keys: set[str] = set()
+    for record in topic_generation_records:
+        topic = record["topic"]
+        key = f"{record['document']}::{topic.topic_id}"
+        if key in seen_topic_keys:
+            continue
+        seen_topic_keys.add(key)
+        topics_by_document[record["document"]].append(
+            {
+                "topic_id": topic.topic_id,
+                "name": topic.name,
+                "summary": topic.summary,
+                "keywords": list(topic.keywords),
+            }
+        )
+
+    reassign_stats = {"reassigned": 0, "rejected_no_match": 0, "kept_as_is": 0}
+    reassign_rejected: list[dict[str, Any]] = []
+    if topics_by_document:
+        generated, reassign_rejected, reassign_stats = apply_topic_reassignment(
+            generated, topics_by_document
+        )
+
     quality_candidates, rejected_rows, quality_stats = apply_quality_gate(generated, args.quality_gate)
+    if reassign_rejected:
+        rejected_rows.extend(reassign_rejected)
+        quality_stats["rejection_reasons"]["topic_mismatch_reassign"] = (
+            quality_stats["rejection_reasons"].get("topic_mismatch_reassign", 0)
+            + len(reassign_rejected)
+        )
+        quality_stats["rejected_items"] = len(rejected_rows)
+    quality_stats["topic_reassignments"] = reassign_stats
+
+    backfill_items: list[dict[str, Any]] = []
+    unfillable_topics: list[dict[str, Any]] = []
+    backfill_attempts_log: list[dict[str, Any]] = []
     if not seed_question_mode_active and topic_generation_records:
         min_items_per_topic = 2
-        accepted_by_topic: dict[str, int] = {}
-        for item in quality_candidates:
-            topic_key = f"{item.get('document', '__missing__')}::{item.get('topic_id', '__missing__')}"
-            accepted_by_topic[topic_key] = accepted_by_topic.get(topic_key, 0) + 1
+        target_items_per_topic = args.questions_per_topic
+        max_backfill_attempts = 2
+        primary_retrieval = getattr(args, "retrieval", "lexical")
+        alt_retrieval = "semantic" if primary_retrieval in {"hybrid", "lexical"} else "hybrid"
 
-        backfill_items: list[dict[str, Any]] = []
+        chunks_by_document: dict[str, list[Chunk]] = {}
+        all_topics_by_document: dict[str, list[Topic]] = {}
+        for record in topic_generation_records:
+            chunks_by_document.setdefault(record["document"], record.get("chunks") or [])
+            doc_topics = all_topics_by_document.setdefault(record["document"], [])
+            if all(record["topic"].topic_id != t.topic_id for t in doc_topics):
+                doc_topics.append(record["topic"])
+
         for record_idx, record in enumerate(topic_generation_records):
             topic = record["topic"]
             topic_key = f"{record['document']}::{topic.topic_id}"
-            accepted_count = accepted_by_topic.get(topic_key, 0)
-            if accepted_count >= min_items_per_topic:
+            accepted_count = sum(
+                1
+                for item in quality_candidates
+                if f"{item.get('document', '__missing__')}::{item.get('topic_id', '__missing__')}" == topic_key
+            )
+            if accepted_count >= target_items_per_topic:
                 continue
-            needed = min(args.questions_per_topic, min_items_per_topic - accepted_count + 2)
-            existing_questions = [
-                str(item.get("question", ""))
-                for item in generated + backfill_items
-                if item.get("document") == record["document"]
-            ]
-            print(
-                f"[BACKFILL] {record['document']} / {topic.name[:60]}: "
-                f"{accepted_count} aceptados; generando {needed}."
-            )
-            extra_items, _ = generate_items_for_topic(
-                model=args.model,
-                document=record["document"],
-                topic=topic,
-                topic_context=record["topic_context"],
-                language=record["language"],
-                questions_per_topic=needed,
-                temperature=args.temperature,
-                existing_questions=existing_questions,
-                seed=args.seed + 1000 + record_idx,
-                document_language=record["document_language"],
-                id_offset=args.questions_per_topic,
-            )
-            backfill_items.extend(extra_items)
 
-        quality_stats["backfill_generated_items"] = len(backfill_items)
+            attempts_used = 0
+            attempt_contexts: list[str] = [record["topic_context"]]
+            for attempt in range(1, max_backfill_attempts + 1):
+                attempts_used = attempt
+                if attempt == 1:
+                    topic_context_for_attempt = record["topic_context"]
+                else:
+                    used_chunk_ids = {
+                        chunk_id
+                        for ctx in attempt_contexts
+                        for chunk_id in re.findall(r"\[([\w.-]+-chunk-\d{4,})\]", ctx)
+                    }
+                    doc_chunks = chunks_by_document.get(record["document"], [])
+                    doc_topics = all_topics_by_document.get(record["document"], [topic])
+                    topic_context_for_attempt = build_topic_context(
+                        chunks=doc_chunks,
+                        topic=topic,
+                        max_topic_context_chars=args.max_topic_context_chars,
+                        retrieval_mode=alt_retrieval,
+                        embedding_model=getattr(args, "embedding_model", DEFAULT_EMBEDDING_MODEL),
+                        embedding_cache=record.get("embedding_cache"),
+                        all_topics=doc_topics,
+                        excluded_chunk_ids=used_chunk_ids,
+                    )
+                    if not topic_context_for_attempt.strip():
+                        break
+                    attempt_contexts.append(topic_context_for_attempt)
+
+                used_context_sources = {
+                    normalize_whitespace(str(item.get("context_source", "")))
+                    for item in [*generated, *backfill_items, *quality_candidates]
+                    if item.get("document") == record["document"]
+                    and f"{item.get('document', '__missing__')}::{item.get('topic_id', '__missing__')}" == topic_key
+                    and str(item.get("context_source", "")).strip()
+                }
+                used_context_sources.update(
+                    normalize_whitespace(str(text))
+                    for text in record.get("attempted_context_sources", [])
+                    if str(text).strip()
+                )
+                needed = max(1, target_items_per_topic - accepted_count)
+                existing_questions = [
+                    str(item.get("question", ""))
+                    for item in generated + backfill_items
+                    if item.get("document") == record["document"]
+                ]
+                strategy_label = "primary" if attempt == 1 else f"alt:{alt_retrieval}"
+                print(
+                    f"[BACKFILL/{attempt}] {record['document']} / {topic.name[:60]}: "
+                    f"{accepted_count} aceptados; generando {needed} ({strategy_label})."
+                )
+                doc_topics = all_topics_by_document.get(record["document"], [topic])
+                extra_items, extra_debug = generate_items_for_topic(
+                    model=args.model,
+                    document=record["document"],
+                    topic=topic,
+                    topic_context=topic_context_for_attempt,
+                    language=record["language"],
+                    questions_per_topic=needed,
+                    temperature=args.temperature,
+                    existing_questions=existing_questions,
+                    seed=args.seed + 1000 * attempt + record_idx,
+                    document_language=record["document_language"],
+                    id_offset=args.questions_per_topic * attempt,
+                    all_topics=doc_topics,
+                    used_context_sources=used_context_sources,
+                )
+                merge_evidence_first_stats(evidence_first_stats, extra_debug.get("evidence_first"))
+                record.setdefault("attempted_context_sources", []).extend(
+                    extra_debug.get("attempted_context_sources", [])
+                )
+                backfill_attempts_log.append(
+                    {
+                        "topic_key": topic_key,
+                        "attempt": attempt,
+                        "strategy": strategy_label,
+                        "generated": len(extra_items),
+                        "evidence_first": extra_debug.get("evidence_first", {}),
+                    }
+                )
+
+                if topics_by_document.get(record["document"]):
+                    extra_kept, extra_rejected, extra_reassign_stats = apply_topic_reassignment(
+                        extra_items, topics_by_document
+                    )
+                    for key, value in extra_reassign_stats.items():
+                        reassign_stats[key] = reassign_stats.get(key, 0) + value
+                    if extra_rejected:
+                        rejected_rows.extend(extra_rejected)
+                        quality_stats["rejection_reasons"]["topic_mismatch_reassign"] = (
+                            quality_stats["rejection_reasons"].get("topic_mismatch_reassign", 0)
+                            + len(extra_rejected)
+                        )
+
+                    accepted_now, rejected_now, _ = apply_quality_gate(extra_kept, args.quality_gate)
+                    rejected_rows.extend(rejected_now)
+                    backfill_items.extend(accepted_now)
+                    for reason in [r.get("rejection_reason", "") for r in rejected_now]:
+                        if reason:
+                            quality_stats["rejection_reasons"][reason] = (
+                                quality_stats["rejection_reasons"].get(reason, 0) + 1
+                            )
+
+                    matching = sum(
+                        1
+                        for item in accepted_now
+                        if f"{item.get('document', '__missing__')}::{item.get('topic_id', '__missing__')}"
+                        == topic_key
+                    )
+                    accepted_count += matching
+                    quality_candidates.extend(accepted_now)
+
+                if accepted_count >= target_items_per_topic:
+                    break
+
+            if accepted_count < min_items_per_topic:
+                unfillable_topics.append(
+                    {
+                        "document": record["document"],
+                        "topic_id": topic.topic_id,
+                        "topic_name": topic.name,
+                        "attempts": attempts_used,
+                        "accepted": accepted_count,
+                    }
+                )
+
         if backfill_items:
             generated.extend(backfill_items)
             affected_pdf_paths = {
@@ -646,15 +845,22 @@ def main() -> None:
                     affected_pdf_path,
                     [item for item in generated if item.get("document") == affected_pdf_path.name],
                 )
-            quality_candidates, rejected_rows, quality_stats = apply_quality_gate(generated, args.quality_gate)
-            quality_stats["backfill_generated_items"] = len(backfill_items)
 
-    deduped = deduplicate_items(quality_candidates)
+    quality_stats["backfill_generated_items"] = len(backfill_items)
+    quality_stats["backfill_attempts"] = backfill_attempts_log
+    quality_stats["unfillable_topics"] = unfillable_topics
+    quality_stats["topic_reassignments"] = reassign_stats
+    quality_stats["evidence_first"] = evidence_first_stats
+    quality_stats["rejected_items"] = len(rejected_rows)
+
+    deduped, dedup_breakdown = deduplicate_items(quality_candidates, return_stats=True)
     quality_stats["accepted_items_before_dedup"] = len(quality_candidates)
-    quality_stats["verified_items_before_dedup"] = quality_stats["verified_items"]
+    quality_stats["verified_items_before_dedup"] = sum(
+        1 for item in quality_candidates if item.get("context_source_verified")
+    )
     quality_stats["duplicate_items_removed_after_quality"] = len(quality_candidates) - len(deduped)
-    quality_stats["accepted_items"] = len(deduped)
-    quality_stats["verified_items"] = sum(1 for item in deduped if item.get("context_source_verified"))
+    quality_stats["dedup_breakdown"] = dedup_breakdown
+    refresh_quality_counts(quality_stats, deduped, rejected_rows)
 
     output_base = args.output.with_suffix("")
     final_rows = deduped
@@ -673,10 +879,9 @@ def main() -> None:
             rejected_rows.extend(judge_rejected_rows)
             quality_stats["judge_filtered_items"] = len(judge_rejected_rows)
             quality_stats["final_items_after_judge"] = len(final_rows)
-            quality_stats["accepted_items"] = len(final_rows)
-            quality_stats["verified_items"] = sum(
-                1 for item in final_rows if item.get("context_source_verified")
-            )
+            refresh_quality_counts(quality_stats, final_rows, rejected_rows)
+    else:
+        refresh_quality_counts(quality_stats, final_rows, rejected_rows)
 
     train_rows, val_rows, test_rows = split_rows(final_rows, split=split, seed=args.seed)
     expected_topic_ids = [
@@ -709,7 +914,7 @@ def main() -> None:
         "chunk_count": total_chunks,
         "topic_count": total_topics,
         "generated_items": len(generated),
-        "deduplicated_items": len(final_rows),
+        "deduplicated_items": len(deduped),
         "accepted_items": len(final_rows),
         "rejected_items": len(rejected_rows),
         "context_source_verified_items": verified_count,
@@ -758,6 +963,40 @@ def main() -> None:
         print(f"- Items filtrados por juez: {quality_stats.get('judge_filtered_items', 0)}")
     print(f"- Splits: train={len(train_rows)} val={len(val_rows)} test={len(test_rows)}")
     print(f"- context_source verificado (substring literal): {verified_count}/{len(final_rows)}")
+    coverage_ratio = dataset_audit.get("coverage_ratio", 0.0)
+    pipeline_success = dataset_audit.get("pipeline_success", False)
+    print(
+        f"- Cobertura de topicos: {coverage_ratio*100:.1f}% "
+        f"(topicos sin items: {len(dataset_audit['topics_without_accepted'])})"
+    )
+    reassign = quality_stats.get("topic_reassignments", {})
+    if reassign:
+        print(
+            f"- Reasignaciones de topico: {reassign.get('reassigned', 0)}; "
+            f"rechazos por reasignacion: {reassign.get('rejected_no_match', 0)}"
+        )
+    evidence_first = quality_stats.get("evidence_first", {})
+    if evidence_first:
+        print(
+            "- Evidence-first: "
+            f"ventanas={evidence_first.get('candidate_windows', 0)} "
+            f"intentadas={evidence_first.get('attempted_windows', 0)} "
+            f"aceptadas={evidence_first.get('accepted_from_evidence', 0)} "
+            f"reparaciones={evidence_first.get('repair_attempts', 0)}"
+        )
+    dedup_breakdown = quality_stats.get("dedup_breakdown", {})
+    if dedup_breakdown:
+        print(
+            "- Duplicados (detalle): "
+            f"exact={dedup_breakdown.get('duplicate_exact', 0)} "
+            f"q={dedup_breakdown.get('duplicate_semantic_question', 0)} "
+            f"qa={dedup_breakdown.get('duplicate_semantic_qa', 0)} "
+            f"a={dedup_breakdown.get('duplicate_semantic_answer', 0)}"
+        )
+    unfillable = quality_stats.get("unfillable_topics", [])
+    if unfillable:
+        print(f"- Topicos sin minimo (unfillable_topics): {len(unfillable)}")
+    print(f"- pipeline_success: {pipeline_success}")
     if dataset_audit["warnings"]:
         print(f"- Avisos de auditoria: {len(dataset_audit['warnings'])}")
     if args.resume:
