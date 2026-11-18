@@ -2,6 +2,8 @@
 
 Generate supervised QA datasets from PDFs using local Ollama models.
 
+> **Context.** Built in April 2026 as a personal project, when I was working at Grupo CEU and finishing my Computer Engineering degree at UPV. It automates the QA datasets I used to build by hand with NotebookLM, as described below.
+
 ## Why This Repo Exists
 
 I needed high-quality QA datasets for my own projects, especially in **Spanish (Castilian)** and **Valencian**, and the pipelines I had available didn't cover that workflow well. Until now, I was building those datasets **manually with NotebookLM**: slow, non-reproducible, and hard to iterate on.
@@ -139,10 +141,10 @@ Generation is evidence-first by default. For each topic, the code extracts and r
 
 The deterministic quality gate also rejects:
 
-- **Mojibake** — double-encoded UTF-8 sequences (e.g. `â€™`, `Î¸`) in any Q/A field. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback.
-- **Cross-chunk context** (`cross_chunk_context`) — `context_source` that contains an internal chunk marker, meaning the LLM copied text spanning two source chunks. Markers are also stripped from generated text before quality checks.
-- **Verbatim answers** (`verbatim_answer`) — answers with >= 70 % answer-bigram overlap with `context_source`, including short copied evidence phrases.
-- **Topic mismatch on reassignment** (`topic_mismatch_reassign`) — items whose question/answer/context do not match any topic discovered in the same document. Items that match a different topic better than the one they were generated under are reassigned (a `reassigned_from` field is added to track the move).
+- **Mojibake**: double-encoded UTF-8 sequences (e.g. `â€™`, `Î¸`) in any Q/A field. Encoding is normalized at PDF extraction time using `ftfy` when available, or a built-in replacement map as fallback.
+- **Cross-chunk context** (`cross_chunk_context`): `context_source` that contains an internal chunk marker, meaning the LLM copied text spanning two source chunks. Markers are also stripped from generated text before quality checks.
+- **Verbatim answers** (`verbatim_answer`): answers with >= 70 % answer-bigram overlap with `context_source`, including short copied evidence phrases.
+- **Topic mismatch on reassignment** (`topic_mismatch_reassign`): items whose question/answer/context do not match any topic discovered in the same document. Items that match a different topic better than the one they were generated under are reassigned (a `reassigned_from` field is added to track the move).
 - Context that appears to start or end mid-sentence, broken figure references, degraded formula notation, replacement characters, dangling section letters at the end (e.g. trailing `... C.`), and answers that add too many unsupported content terms for RAG-style factual rows.
 
 Topic-aware retrieval penalizes chunks that overlap with sibling topics in the same document, and the literal-name match heuristic only triggers when the topic name appears in at most two contiguous chunks. Backfill for under-covered topics targets `--questions-per-topic` accepted rows and requires at least two final rows per topic for coverage. It first tries unused evidence windows from the primary topic context; the second attempt regenerates the topic context with an alternative retrieval strategy and excludes chunks already used. Topics that still fall short of two accepted items are recorded in `quality.unfillable_topics`.
