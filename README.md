@@ -2,6 +2,8 @@
 
 Generate supervised QA datasets from PDFs using local Ollama models.
 
+> **Context.** Built in April 2026 as a personal project, when I was working at Grupo CEU and finishing my Computer Engineering degree at UPV. It automates the QA datasets I used to build by hand with NotebookLM, as described below.
+
 ## Why This Repo Exists
 
 I needed high-quality QA datasets for my own projects, especially in **Spanish (Castilian)** and **Valencian**, and the pipelines I had available didn't cover that workflow well. Until now, I was building those datasets **manually with NotebookLM**: slow, non-reproducible, and hard to iterate on.
